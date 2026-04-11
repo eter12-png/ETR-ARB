@@ -9,14 +9,17 @@ from collections import Counter
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- AYARLAR ---
-API_KEY = "burada api yazıyor paylaşmamak için sildim"
-TELEGRAM_TOKEN = "burada api yazıyor paylaşmamak için sildim"
+# --- AYARLAR (GÜVENLİ - RAILWAY'DEN OKUR) ---
+# Railway panelinde "Variables" kısmına bu isimlerle ekleme yapmalısın.
+API_KEY = os.getenv("CSFLOAT_API_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
 MIN_PRICE_LIMIT = 0.20
 MIN_VOLUME_LIMIT = 50
 
 # --- YARDIMCI FONKSİYONLAR ---
 def load_items():
+    # items.txt dosyasının GitHub'da olduğundan emin ol
     if os.path.exists("items.txt"):
         with open("items.txt", "r", encoding="utf-8") as f:
             return [line.strip() for line in f.readlines() if line.strip()]
@@ -52,23 +55,18 @@ async def fetch_item(session, name, idx, total):
         async with session.get(s_url, headers=headers, timeout=15) as r_s:
             if r_s.status == 429:
                 return ("RETRY", "Steam rate limit (429)")
-
             if r_s.status != 200:
                 return ("SKIP", f"Steam HTTP hata: {r_s.status}")
-
             s_data = await r_s.json()
-
             if not s_data or "lowest_price" not in s_data:
                 return ("SKIP", "Steam lowest_price yok")
 
             raw_vol = str(s_data.get("volume", "0")).replace(",", "")
             vol = int(raw_vol) if raw_vol.isdigit() else 0
-
             if vol < MIN_VOLUME_LIMIT:
                 return ("SKIP", f"Düşük volume: {vol}")
 
             s_price = float(s_data["lowest_price"].replace("$", "").replace(",", ""))
-
             if s_price < MIN_PRICE_LIMIT:
                 return ("SKIP", f"Düşük Steam fiyat: {s_price}")
 
@@ -78,16 +76,13 @@ async def fetch_item(session, name, idx, total):
         async with session.get(f_url, headers={"Authorization": API_KEY}, timeout=15) as r_f:
             if r_f.status == 429:
                 return ("RETRY", "CSFloat rate limit (429)")
-
             f_data = await r_f.json()
             listings = f_data if isinstance(f_data, list) else f_data.get('data', [])
-
             if not listings:
                 return ("SKIP", "CSFloat boş listing")
 
             prices = [round(l['price']/100, 2) for l in listings]
             f_price = max(Counter(prices), key=Counter(prices).get)
-
             if f_price < MIN_PRICE_LIMIT:
                 return ("SKIP", f"Düşük CSFloat fiyat: {f_price}")
 
@@ -96,7 +91,6 @@ async def fetch_item(session, name, idx, total):
 
     except Exception as e:
         return ("RETRY", f"Exception: {str(e)}")
-
 
 # --- TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -108,10 +102,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-
     if text in ['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']:
         context.user_data['mode'] = text
-        await update.message.reply_text("💰 Bakiye gir (Örn: 787.09):", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("💰 Bakiye gir (Örn: 500):", reply_markup=ReplyKeyboardRemove())
         return
 
     if 'mode' in context.user_data and 'analyzing' not in context.user_data:
@@ -120,103 +113,70 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['analyzing'] = True
             mode = context.user_data['mode']
         except:
-            await update.message.reply_text("❌ Geçerli sayı gir")
+            await update.message.reply_text("❌ Geçerli bir sayı girin.")
             return
 
         raw_items = load_items()
         total = len(raw_items)
         all_results = []
-
-        filename = f"results_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt"
-
-        status_msg = await update.message.reply_text(f"🛰 {user_balance}$ analiz başladı")
+        status_msg = await update.message.reply_text(f"🛰 {user_balance}$ analiz başladı...")
 
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(raw_items, 1):
-
                 if i % 5 == 0:
                     try:
-                        await status_msg.edit_text(f"📡 {i}/{total} | İşlenen item: {len(all_results)}")
-                    except:
-                        pass
+                        await status_msg.edit_text(f"📡 {i}/{total} | İşlenen: {len(all_results)}")
+                    except: pass
 
                 res = await fetch_item(session, item, i, total)
-
                 retry_count = 0
                 while isinstance(res, tuple) and res[0] == "RETRY" and retry_count < 2:
                     await asyncio.sleep(random.uniform(60, 120))
                     res = await fetch_item(session, item, i, total)
                     retry_count += 1
 
-                # --- SKIP LOG (FIXED) ---
                 if isinstance(res, tuple) and res[0] == "SKIP":
-                    reason = res[1]
-                    print(f"[{i}/{total}] {item} → SKIPPED | {reason}")
                     continue
-
                 if isinstance(res, dict):
                     all_results.append(res)
 
-                    with open(filename, "a", encoding="utf-8") as f:
-                        f.write(f"{res['name']} | Steam:{res['s']} | CSFloat:{res['f']} | Vol:{res['vol']}\n")
-
                 await asyncio.sleep(random.uniform(14, 20))
-
-                if i % 20 == 0:
-                    await asyncio.sleep(random.uniform(120, 180))
-
-                if i % 100 == 0:
-                    await asyncio.sleep(random.uniform(600, 900))
+                if i % 20 == 0: await asyncio.sleep(random.uniform(120, 180))
 
         # --- HESAPLAMA ---
         final_list = []
         for data in all_results:
             buy_price = data['f'] if 'CSFloat -> Steam' in mode else data['s']
             sell_price = data['s'] if 'CSFloat -> Steam' in mode else data['f']
-
-            if 'CSFloat -> Steam' in mode:
-                net_sell_price = steam_net_hesapla(sell_price)
-            else:
-                net_sell_price = round(sell_price * 0.98, 2)
+            net_sell_price = steam_net_hesapla(sell_price) if 'CSFloat -> Steam' in mode else round(sell_price * 0.98, 2)
 
             if buy_price > 0:
                 quantity = math.floor(user_balance / buy_price)
                 if quantity > 0:
-                    total_cost = quantity * buy_price
-                    total_revenue = quantity * net_sell_price
-                    total_profit = round(total_revenue - total_cost, 2)
-
+                    total_profit = round((quantity * net_sell_price) - (quantity * buy_price), 2)
                     final_list.append({
                         'name': data['name'],
                         'qty': quantity,
-                        'buy': buy_price,
-                        'net_sell': net_sell_price,
-                        'profit': total_profit,
-                        'final_balance': round(user_balance + total_profit, 2),
-                        'vol': data['vol']
+                        'profit': total_profit
                     })
 
         sorted_res = sorted(final_list, key=lambda x: x['profit'], reverse=True)[:5]
-
         if not sorted_res:
-            await status_msg.edit_text("❌ Kârlı item yok")
+            await status_msg.edit_text("❌ Kârlı item bulunamadı.")
         else:
-            report = f"🏆 EN İYİ 5\n\n"
+            report = f"🏆 EN İYİ 5 ({mode})\n\n"
             for i, item in enumerate(sorted_res, 1):
-                report += f"{i}. {item['name']}\n"
-                report += f"Adet: {item['qty']}\n"
-                report += f"Kâr: +${item['profit']}\n\n"
-
+                report += f"{i}. {item['name']}\nAdet: {item['qty']} | Kâr: +${item['profit']}\n\n"
             await status_msg.edit_text(report)
 
         context.user_data.clear()
 
-
-# --- MAIN ---
 if __name__ == "__main__":
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_msg))
-
-    print("🚀 Bot aktif")
-    app.run_polling()
+    if not TELEGRAM_TOKEN or not API_KEY:
+        print("❌ HATA: API_KEY veya TELEGRAM_TOKEN sistem değişkeni bulunamadı!")
+    else:
+        app = Application.builder().token(TELEGRAM_TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_msg))
+        print("🚀 Bot aktif, Railway üzerinde çalışıyor...")
+        app.run_polling()
