@@ -10,16 +10,17 @@ from collections import Counter
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- LOGGING YAPILANDIRMASI (Terminal Takibi İçin) ---
+# --- LOGGING YAPILANDIRMASI ---
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- AYARLAR ---
+# --- AYARLAR (RAILWAY VARIABLES) ---
 API_KEY = os.getenv("CSFLOAT_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
 MIN_PRICE_LIMIT = 0.20
 MIN_VOLUME_LIMIT = 50
 
@@ -37,7 +38,7 @@ def load_items():
             items = [line.strip() for line in f.readlines() if line.strip()]
             logger.info(f"📦 {len(items)} adet item dosyadan yüklendi.")
             return items
-    logger.error("❌ HATA: items.txt dosyası bulunamadı!")
+    logger.error("❌ HATA: items.txt dosyası ana dizinde bulunamadı!")
     return []
 
 def steam_net_hesapla(buyer_pays):
@@ -64,53 +65,60 @@ async def fetch_item(session, name, idx, total):
     try:
         async with session.get(s_url, headers=headers, timeout=15) as r_s:
             if r_s.status == 429:
-                logger.warning(f"⚠️ [STEAM 429] Limit aşıldı: {name}")
+                logger.warning(f"⚠️ [LIMIT] Steam 429 - Çok fazla istek: {name}")
                 return ("RETRY", "Steam 429")
             if r_s.status != 200:
-                logger.error(f"❌ [STEAM ERROR] Status {r_s.status}: {name}")
-                return ("SKIP", f"S-{r_s.status}")
+                logger.error(f"❌ [HATA] Steam {r_s.status} Hatası: {name}")
+                return ("SKIP", f"Steam {r_s.status}")
             
             s_data = await r_s.json()
             if not s_data or "lowest_price" not in s_data:
-                return ("SKIP", "No Price")
+                logger.info(f"⏭️ [ATLANDI] Fiyat Yok: {name}")
+                return ("SKIP", "Fiyat Yok")
             
-            vol = int(str(s_data.get("volume", "0")).replace(",", "")) if str(s_data.get("volume", "0")).replace(",", "").isdigit() else 0
+            vol_raw = str(s_data.get("volume", "0")).replace(",", "")
+            vol = int(vol_raw) if vol_raw.isdigit() else 0
+            
             if vol < MIN_VOLUME_LIMIT:
-                return ("SKIP", "Düşük Vol")
+                logger.info(f"⏭️ [ATLANDI] Düşük Hacim ({vol} < {MIN_VOLUME_LIMIT}): {name}")
+                return ("SKIP", f"Düşük Hacim ({vol})")
+            
             s_price = float(s_data["lowest_price"].replace("$", "").replace(",", ""))
 
-        await asyncio.sleep(random.uniform(1, 2))
+        await asyncio.sleep(random.uniform(1.5, 3.0))
 
         async with session.get(f_url, headers={"Authorization": API_KEY}, timeout=15) as r_f:
             if r_f.status == 429:
-                logger.warning(f"⚠️ [CSFLOAT 429] Limit aşıldı: {name}")
+                logger.warning(f"⚠️ [LIMIT] CSFloat 429: {name}")
                 return ("RETRY", "Float 429")
             
             f_data = await r_f.json()
             listings = f_data if isinstance(f_data, list) else f_data.get('data', [])
+            
             if not listings:
-                return ("SKIP", "No Float List")
+                logger.info(f"⏭️ [ATLANDI] Float Listelemesi Yok: {name}")
+                return ("SKIP", "İlan Yok")
             
             prices = [round(l['price']/100, 2) for l in listings]
             f_price = max(Counter(prices), key=Counter(prices).get)
 
-        logger.info(f"✅ [{idx}/{total}] {name} tarandı.")
+        logger.info(f"✅ [{idx}/{total}] {name} başarıyla tarandı.")
         return {"name": name, "s": s_price, "f": f_price, "vol": vol}
     
     except Exception as e:
-        logger.error(f"🔥 Kritik Hata ({name}): {str(e)}")
+        logger.error(f"🔥 [KRİTİK HATA] {name}: {str(e)}")
         return ("RETRY", str(e))
 
 # --- TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']]
-    await update.message.reply_text("🚀 Bot Hazır. Yön seçin:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    await update.message.reply_text("🚀 Yön seçin:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text in ['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']:
         context.user_data['mode'] = text
-        await update.message.reply_text("💰 Analiz edilecek dolar bakiyesini girin:", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("💰 Bakiye gir (Örn: 500):", reply_markup=ReplyKeyboardRemove())
         return
 
     if 'mode' in context.user_data and 'analyzing' not in context.user_data:
@@ -119,12 +127,12 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['analyzing'] = True
             mode = context.user_data['mode']
         except:
-            await update.message.reply_text("❌ Lütfen geçerli bir sayı girin.")
+            await update.message.reply_text("❌ Sayı girin.")
             return
 
         items_list = load_items()
         if not items_list:
-            await update.message.reply_text("❌ Hata: Ürün listesi boş!")
+            await update.message.reply_text("❌ HATA: items.txt bulunamadı veya boş!")
             context.user_data.clear()
             return
 
@@ -133,7 +141,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         errors_count = 0
         success_count = 0
         
-        status_msg = await update.message.reply_text(f"🛰 Analiz başlıyor (0/{total})...")
+        status_msg = await update.message.reply_text(f"🛰 {total} item için analiz başladı...")
 
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
@@ -141,8 +149,8 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 # Retry mekanizması
                 retry_count = 0
-                while isinstance(res, tuple) and res[0] == "RETRY" and retry_count < 1:
-                    logger.info(f"⏳ {item} için 30sn bekleniyor (Retry)...")
+                while isinstance(res, tuple) and res[0] == "RETRY" and retry_count < 2:
+                    logger.info(f"⏳ {item} için 30sn bekleniyor (Retry {retry_count+1})...")
                     await asyncio.sleep(30)
                     res = await fetch_item(session, item, i, total)
                     retry_count += 1
@@ -153,10 +161,9 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     errors_count += 1
 
-                # Her 3 itemda bir Telegram arayüzünü güncelle
                 if i % 3 == 0 or i == total:
                     prog_bar = generate_progress_bar(i, total)
-                    text = (
+                    progress_text = (
                         f"📊 **Analiz Durumu**\n"
                         f"{prog_bar}\n\n"
                         f"✅ Başarılı: {success_count}\n"
@@ -164,12 +171,11 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"📦 Toplam: {i}/{total}"
                     )
                     try:
-                        await status_msg.edit_text(text, parse_mode="Markdown")
+                        await status_msg.edit_text(progress_text, parse_mode="Markdown")
                     except:
                         pass
                 
-                # Ban koruması (Railway üzerinde daha sağlıklı çalışması için)
-                await asyncio.sleep(random.uniform(4, 7))
+                await asyncio.sleep(random.uniform(5, 10))
 
         # --- HESAPLAMA ---
         final_list = []
@@ -184,20 +190,19 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 final_list.append({'name': data['name'], 'qty': qty, 'profit': profit})
 
         sorted_res = sorted(final_list, key=lambda x: x['profit'], reverse=True)[:5]
-        
         if not sorted_res:
-            await update.message.reply_text("❌ Mevcut bakiye ve filtrelere göre kârlı ürün bulunamadı.")
+            await update.message.reply_text("❌ Kârlı bir fırsat bulunamadı.")
         else:
             report = f"🏆 **EN İYİ 5 FIRSAT** ({mode})\n\n"
             for i, item in enumerate(sorted_res, 1):
-                report += f"{i}. `{item['name']}`\n      Adet: {item['qty']} | Toplam Kâr: *+${item['profit']}*\n\n"
+                report += f"{i}. `{item['name']}`\nAdet: {item['qty']} | Kâr: *+${item['profit']}*\n\n"
             await update.message.reply_text(report, parse_mode="Markdown")
         
         context.user_data.clear()
 
 if __name__ == "__main__":
     if not TELEGRAM_TOKEN or not API_KEY:
-        logger.critical("❌ Ortam değişkenleri (API_KEY, TOKEN) bulunamadı!")
+        logger.critical("❌ Değişkenler eksik!")
     else:
         app = Application.builder().token(TELEGRAM_TOKEN).build()
         app.add_handler(CommandHandler("start", start))
