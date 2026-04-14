@@ -23,17 +23,20 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MIN_VOLUME_LIMIT = 50
 
 # --- YARDIMCI FONKSİYONLAR ---
-def generate_progress_bar(current, total, bar_length=10):
+def generate_progress_bar(current, total):
+    bar_length = 15
     fraction = current / total
-    arrow = int(fraction * bar_length - 1) * '█' + '█'
-    padding = int(bar_length - len(arrow)) * '░'
+    filled = int(fraction * bar_length)
+    # Daha profesyonel görünüm için özel karakterler
+    bar = "▬" * filled + "▷" + "─" * (bar_length - filled - 1)
     percent = int(fraction * 100)
-    return f"|{arrow}{padding}| %{percent}"
+    return f"◈ {bar} %{percent}"
 
 def load_items():
     if os.path.exists("items.txt"):
         with open("items.txt", "r", encoding="utf-8") as f:
             items = [line.strip() for line in f.readlines() if line.strip()]
+            logger.info(f"📦 {len(items)} adet item dosyadan yüklendi.")
             return items
     return []
 
@@ -51,7 +54,7 @@ def steam_net_hesapla(buyer_pays):
         else: seller_gets = round(seller_gets - 0.01, 2)
     return seller_gets
 
-# --- VERİ ÇEKME (Detaylı Loglama) ---
+# --- VERİ ÇEKME ---
 async def fetch_item(session, name, idx, total):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
     safe_name = urllib.parse.quote(name)
@@ -69,7 +72,7 @@ async def fetch_item(session, name, idx, total):
             
             s_data = await r_s.json()
             if not s_data or "lowest_price" not in s_data:
-                logger.info(f"⏭️ [ATLANDI] Fiyat Yok: {name}")
+                logger.info(f"⏭️ [ATLANDI] Fiyat Verisi Yok: {name}")
                 return ("SKIP", "Fiyat Yok")
             
             vol_raw = str(s_data.get("volume", "0")).replace(",", "")
@@ -81,11 +84,12 @@ async def fetch_item(session, name, idx, total):
             
             s_price = float(s_data["lowest_price"].replace("$", "").replace(",", ""))
 
-        await asyncio.sleep(random.uniform(1.5, 2.5))
+        await asyncio.sleep(random.uniform(1.5, 3.0))
 
         async with session.get(f_url, headers={"Authorization": API_KEY}, timeout=15) as r_f:
             f_data = await r_f.json()
             listings = f_data if isinstance(f_data, list) else f_data.get('data', [])
+            
             if not listings:
                 logger.info(f"⏭️ [ATLANDI] Float İlanı Yok: {name}")
                 return ("SKIP", "İlan Yok")
@@ -95,20 +99,21 @@ async def fetch_item(session, name, idx, total):
 
         logger.info(f"✅ [{idx}/{total}] {name} tarandı.")
         return {"name": name, "s": s_price, "f": f_price, "vol": vol}
+    
     except Exception as e:
         logger.error(f"🔥 [HATA] {name}: {str(e)}")
         return ("RETRY", str(e))
 
-# --- TELEGRAM MESAJLARI ---
+# --- TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']]
-    await update.message.reply_text("🚀 İşlem yönü seçin:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    await update.message.reply_text("🚀 Yön seçin:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text in ['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']:
         context.user_data['mode'] = text
-        await update.message.reply_text("💰 Analiz için bakiye girin ($):", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("💰 Bakiye girin ($):", reply_markup=ReplyKeyboardRemove())
         return
 
     if 'mode' in context.user_data and 'analyzing' not in context.user_data:
@@ -117,68 +122,81 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['analyzing'] = True
             mode = context.user_data['mode']
         except:
-            await update.message.reply_text("❌ Lütfen geçerli bir sayı girin.")
+            await update.message.reply_text("❌ Sayı girin.")
             return
 
         items_list = load_items()
         total = len(items_list)
-        all_results, errors, success = [], 0, 0
-        status_msg = await update.message.reply_text(f"🛰 Analiz başladı (Hedef: {total} item)...")
+        all_results, errors_count, success_count = [], 0, 0
+        
+        status_msg = await update.message.reply_text(f"🛰 Analiz başlatıldı...")
 
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
                 res = await fetch_item(session, item, i, total)
                 
                 if isinstance(res, tuple) and res[0] == "RETRY":
-                    await asyncio.sleep(20)
+                    await asyncio.sleep(25)
                     res = await fetch_item(session, item, i, total)
 
                 if isinstance(res, dict):
                     all_results.append(res)
-                    success += 1
-                else: errors += 1
+                    success_count += 1
+                else:
+                    errors_count += 1
 
                 if i % 3 == 0 or i == total:
-                    prog = generate_progress_bar(i, total)
-                    await status_msg.edit_text(f"📊 **Analiz Durumu**\n{prog}\n\n✅ Başarılı: {success}\n⏭️ Atlanan/Hata: {errors}\n📦 Toplam: {i}/{total}", parse_mode="Markdown")
+                    prog_bar = generate_progress_bar(i, total)
+                    progress_text = (
+                        f"📊 **Analiz Durumu**\n"
+                        f"`{prog_bar}`\n\n"
+                        f"✅ Başarılı: {success_count}\n"
+                        f"⏭️ Atlanan/Hata: {errors_count}\n"
+                        f"📦 Toplam: {i}/{total}"
+                    )
+                    try: await status_msg.edit_text(progress_text, parse_mode="Markdown")
+                    except: pass
                 
-                await asyncio.sleep(random.uniform(5, 8))
+                await asyncio.sleep(random.uniform(5, 10))
 
-        # --- HESAPLAMA VE DETAYLI RAPOR ---
+        # --- DETAYLI HESAPLAMA VE ÇIKTI ---
         final_list = []
         for d in all_results:
             if 'CSFloat -> Steam' in mode:
-                buy_price, sell_price = d['f'], d['s']
+                buy_from, buy_price = "CSFloat", d['f']
+                sell_to, sell_price = "Steam", d['s']
                 net_sell = steam_net_hesapla(sell_price)
             else:
-                buy_price, sell_price = d['s'], d['f']
-                net_sell = round(sell_price * 0.98, 2) # Float komisyonu %2 varsayıldı
+                buy_from, buy_price = "Steam", d['s']
+                sell_to, sell_price = "CSFloat", d['f']
+                net_sell = round(sell_price * 0.98, 2)
             
             qty = math.floor(user_balance / buy_price) if buy_price > 0 else 0
             if qty > 0:
-                profit_per_item = round(net_sell - buy_price, 2)
-                total_profit = round(profit_per_item * qty, 2)
-                roi = round((profit_per_item / buy_price) * 100, 1)
+                profit_per = round(net_sell - buy_price, 2)
+                total_profit = round(profit_per * qty, 2)
+                roi = round((profit_per / buy_price) * 100, 1)
                 
                 if total_profit > 0:
                     final_list.append({
                         'name': d['name'], 'qty': qty, 'profit': total_profit,
-                        'buy': buy_price, 'sell': sell_price, 'net': net_sell, 'roi': roi
+                        'buy': buy_price, 'sell': sell_price, 'net': net_sell, 
+                        'roi': roi, 'buy_from': buy_from, 'sell_to': sell_to
                     })
 
         sorted_res = sorted(final_list, key=lambda x: x['profit'], reverse=True)[:5]
         
         if not sorted_res:
-            await update.message.reply_text("❌ Belirtilen bakiyeyle kârlı bir fırsat bulunamadı.")
+            await update.message.reply_text("❌ Kârlı fırsat bulunamadı.")
         else:
             report = f"🏆 **EN İYİ 5 FIRSAT**\n`{mode}`\n`Bakiye: ${user_balance}`\n\n"
             for i, item in enumerate(sorted_res, 1):
                 report += (
                     f"{i}. **{item['name']}**\n"
-                    f"📥 Alış: `${item['buy']}` | 📤 Satış: `${item['sell']}`\n"
-                    f"💰 Net Alınacak: `${item['net']}` (Adet Başı)\n"
-                    f"📦 Adet: `{item['qty']}` | ROI: `%{item['roi']}`\n"
-                    f"✨ **Toplam Kâr: +${item['profit']}**\n\n"
+                    f"📥 Alış ({item['buy_from']}): `${item['buy']}`\n"
+                    f"📤 Satış ({item['sell_to']}): `${item['sell']}`\n"
+                    f"💰 Net Satış: `${item['net']}` | ROI: `%{item['roi']}`\n"
+                    f"📦 Adet: `{item['qty']}` | **Kâr: +${item['profit']}**\n\n"
                 )
             await update.message.reply_text(report, parse_mode="Markdown")
         
