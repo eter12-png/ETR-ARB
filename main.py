@@ -165,16 +165,18 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 if i % 3 == 0 or i == total:
                     prog_bar = generate_progress_bar(i, total)
+                    new_text = (
+                        f"📊 **Analiz Durumu**\n`{prog_bar}`\n\n"
+                        f"✅ Başarılı (Filtreye Uygun): {success_count}\n"
+                        f"⏭️ Atlanan (Hata/Düşük Fiyat): {errors_count}\n"
+                        f"📦 İlerleme: {i}/{total}"
+                    )
                     try:
-                        # Tek mesajda tüm detaylar
-                        await status_msg.edit_text(
-                            f"📊 **Analiz Durumu**\n`{prog_bar}`\n\n"
-                            f"✅ Başarılı (Filtreye Uygun): {success_count}\n"
-                            f"⏭️ Atlanan (Hata/Düşük Fiyat): {errors_count}\n"
-                            f"📦 İlerleme: {i}/{total}", 
-                            parse_mode="Markdown"
-                        )
-                    except: pass
+                        # 400 Bad Request hatasını önlemek için içerik kontrolü
+                        if status_msg.text != new_text:
+                            await status_msg.edit_text(new_text, parse_mode="Markdown")
+                    except: 
+                        pass
                 
                 await asyncio.sleep(random.uniform(5, 10))
 
