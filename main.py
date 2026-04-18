@@ -93,7 +93,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    # Durdurma komutu kontrolü
     if text == "🛑 Taramayı Durdur":
         if context.user_data.get('analyzing'):
             context.user_data['stop_scan'] = True
@@ -105,15 +104,29 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("💰 Bakiye girin ($):", reply_markup=ReplyKeyboardRemove())
         return
 
-    if 'mode' in context.user_data and not context.user_data.get('analyzing'):
+    # Bakiye girildikten sonra min fiyat sorma aşaması
+    if 'mode' in context.user_data and 'balance' not in context.user_data:
         try:
             user_balance = float(text.replace(",", "."))
-            context.user_data['analyzing'] = True
             context.user_data['balance'] = user_balance
+            await update.message.reply_text("📉 Minimum item fiyatı girin ($):")
+            return
+        except:
+            await update.message.reply_text("❌ Geçerli bir bakiye girin.")
+            return
+
+    # Min fiyat girildikten sonra analizi başlatma aşaması
+    if 'balance' in context.user_data and not context.user_data.get('analyzing'):
+        try:
+            min_item_price = float(text.replace(",", "."))
+            context.user_data['min_price'] = min_item_price
+            context.user_data['analyzing'] = True
             context.user_data['stop_scan'] = False
+            
+            user_balance = context.user_data['balance']
             mode = context.user_data['mode']
         except:
-            await update.message.reply_text("❌ Geçerli bir sayı girin.")
+            await update.message.reply_text("❌ Geçerli bir minimum fiyat girin.")
             return
 
         items_list = load_items()
@@ -125,7 +138,6 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
-                # Durdurma kontrolü
                 if context.user_data.get('stop_scan'):
                     await update.message.reply_text("🛑 Tarama kullanıcı tarafından durduruldu.")
                     break
@@ -136,8 +148,13 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     res = await fetch_item(session, item, i, total)
 
                 if isinstance(res, dict):
-                    all_results.append(res)
-                    success_count += 1
+                    # Fiyat Filtreleme (Hangi taraftan alıyorsak o fiyatı kontrol ediyoruz)
+                    check_price = res['f'] if 'CSFloat -> Steam' in mode else res['s']
+                    if check_price >= context.user_data['min_price']:
+                        all_results.append(res)
+                        success_count += 1
+                    else:
+                        errors_count += 1 # Filtreye takılanları da atlanan sayıyoruz
                 else:
                     errors_count += 1
 
@@ -180,7 +197,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sorted_res = sorted(final_list, key=lambda x: x['profit'], reverse=True)[:5]
         
         if sorted_res:
-            report = f"🏆 **EN İYİ 5 FIRSAT**\n`{mode}`\n`Bakiye: ${user_balance}`\n\n"
+            report = f"🏆 **EN İYİ 5 FIRSAT**\n`{mode}`\n`Bakiye: ${user_balance}`\n`Min Fiyat: ${context.user_data['min_price']}`\n\n"
             for idx, item in enumerate(sorted_res, 1):
                 report += (
                     f"{idx}. **{item['name']}**\n"
@@ -201,12 +218,19 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardMarkup(post_scan_kb, resize_keyboard=True)
         )
 
-    # İşlem sonrası buton yönetimi
     elif text == '🔄 Yeniden Başlat':
-        await handle_msg(update, context) # Aynı ayarlarla tekrar çalıştır
+        # Önceki verileri koruyarak analizi tekrar tetikler
+        context.user_data['analyzing'] = False
+        # Yeniden başlatmak için min_price'ı bir kez daha onaylatmak veya direkt başlatmak için:
+        await update.message.reply_text(f"🔄 Mevcut ayarlarla ({context.user_data.get('balance')}$, Min: {context.user_data.get('min_price')}$) devam ediliyor...")
+        await handle_msg(update, context)
+        
     elif text == '💰 Bakiye Değiştir':
-        context.user_data.pop('analyzing', None)
+        mode = context.user_data.get('mode')
+        context.user_data.clear()
+        context.user_data['mode'] = mode
         await update.message.reply_text("💰 Yeni bakiye girin ($):", reply_markup=ReplyKeyboardRemove())
+        
     elif text == '🏠 Ana Menü':
         await start(update, context)
 
