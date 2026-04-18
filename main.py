@@ -104,7 +104,6 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("💰 Bakiye girin ($):", reply_markup=ReplyKeyboardRemove())
         return
 
-    # Bakiye girildikten sonra min fiyat sorma aşaması
     if 'mode' in context.user_data and 'balance' not in context.user_data:
         try:
             user_balance = float(text.replace(",", "."))
@@ -115,7 +114,6 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Geçerli bir bakiye girin.")
             return
 
-    # Min fiyat girildikten sonra analizi başlatma aşaması
     if 'balance' in context.user_data and not context.user_data.get('analyzing'):
         try:
             min_item_price = float(text.replace(",", "."))
@@ -134,7 +132,15 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         all_results, errors_count, success_count = [], 0, 0
         
         stop_kb = [['🛑 Taramayı Durdur']]
-        status_msg = await update.message.reply_text(f"🛰 Analiz başladı...", reply_markup=ReplyKeyboardMarkup(stop_kb, resize_keyboard=True))
+        
+        # 1. Mesaj: Sabit Bildirim
+        await update.message.reply_text(f"🛰 **Analiz başladı...**", parse_mode="Markdown")
+        
+        # 2. Mesaj: Güncellenen Progress Bar Mesajı
+        status_msg = await update.message.reply_text(
+            "⏳ Veriler hazırlanıyor...", 
+            reply_markup=ReplyKeyboardMarkup(stop_kb, resize_keyboard=True)
+        )
 
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
@@ -148,24 +154,24 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     res = await fetch_item(session, item, i, total)
 
                 if isinstance(res, dict):
-                    # Fiyat Filtreleme (Hangi taraftan alıyorsak o fiyatı kontrol ediyoruz)
                     check_price = res['f'] if 'CSFloat -> Steam' in mode else res['s']
                     if check_price >= context.user_data['min_price']:
                         all_results.append(res)
                         success_count += 1
                     else:
-                        errors_count += 1 # Filtreye takılanları da atlanan sayıyoruz
+                        errors_count += 1
                 else:
                     errors_count += 1
 
                 if i % 3 == 0 or i == total:
                     prog_bar = generate_progress_bar(i, total)
                     try:
+                        # Tek mesajda tüm detaylar
                         await status_msg.edit_text(
                             f"📊 **Analiz Durumu**\n`{prog_bar}`\n\n"
-                            f"✅ Başarılı: {success_count}\n"
-                            f"⏭️ Atlanan/Hata: {errors_count}\n"
-                            f"📦 Toplam: {i}/{total}", 
+                            f"✅ Başarılı (Filtreye Uygun): {success_count}\n"
+                            f"⏭️ Atlanan (Hata/Düşük Fiyat): {errors_count}\n"
+                            f"📦 İlerleme: {i}/{total}", 
                             parse_mode="Markdown"
                         )
                     except: pass
@@ -210,7 +216,6 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("❌ Kârlı fırsat bulunamadı.")
 
-        # --- İŞLEM SONRASI ETKİLEŞİM ---
         context.user_data['analyzing'] = False
         post_scan_kb = [['🔄 Yeniden Başlat', '💰 Bakiye Değiştir'], ['🏠 Ana Menü']]
         await update.message.reply_text(
@@ -219,10 +224,8 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif text == '🔄 Yeniden Başlat':
-        # Önceki verileri koruyarak analizi tekrar tetikler
         context.user_data['analyzing'] = False
-        # Yeniden başlatmak için min_price'ı bir kez daha onaylatmak veya direkt başlatmak için:
-        await update.message.reply_text(f"🔄 Mevcut ayarlarla ({context.user_data.get('balance')}$, Min: {context.user_data.get('min_price')}$) devam ediliyor...")
+        await update.message.reply_text(f"🔄 Mevcut ayarlarla devam ediliyor...")
         await handle_msg(update, context)
         
     elif text == '💰 Bakiye Değiştir':
