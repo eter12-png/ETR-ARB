@@ -24,13 +24,26 @@ MIN_VOLUME_LIMIT = 50
 
 # --- YARDIMCI FONKSİYONLAR ---
 def generate_progress_bar(current, total):
-    if total <= 0: return "◈ ─────────────── %0"
-    bar_length = 15
+    if total <= 0: return "⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ %0"
+    
+    bar_length = 10 
     fraction = current / total
     filled = int(fraction * bar_length)
-    bar = "▬" * filled + "▷" + "─" * (max(0, bar_length - filled - 1))
+    
+    # İlerleme durumuna göre renk değiştiren ikonlar
+    if fraction < 0.33:
+        color_block = "🟥" 
+    elif fraction < 0.66:
+        color_block = "🟧" 
+    elif fraction < 0.99:
+        color_block = "🟩" 
+    else:
+        color_block = "✅" 
+        
+    bar = color_block * filled + "⬜" * (bar_length - filled)
     percent = int(fraction * 100)
-    return f"◈ {bar} %{percent}"
+    
+    return f"┣ {bar}  `%{percent}`\n┗━━━━━━━━━━━━━━"
 
 def load_items():
     if os.path.exists("items.txt"):
@@ -120,12 +133,12 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = len(items_list)
         all_results, errors_count, success_count = [], 0, 0
         
-        # Analiz başladı mesajı yerine doğrudan profesyonel progress bar ile başlıyoruz
+        # Profesyonel ve emoji tabanlı bar ile başlıyoruz
         prog_bar = generate_progress_bar(0, total)
         status_msg = await update.message.reply_text(
-            f"🛰 **MARKET VERİLERİ ANALİZ EDİLİYOR**\n"
-            f"`{prog_bar}`\n\n"
-            f"🔄 Durum: `Hazırlanıyor...`",
+            f"💠 **MARKET ANALİZİ YAPILIYOR**\n"
+            f"{prog_bar}\n\n"
+            f"📡 Durum: `Hazırlanıyor...`",
             reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True),
             parse_mode="Markdown"
         )
@@ -136,14 +149,13 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await status_msg.edit_text("🛑 **Tarama kullanıcı tarafından durduruldu.**")
                     break
 
-                # Her item öncesi görsel güncelleme
                 try:
                     current_bar = generate_progress_bar(i-1, total)
                     await status_msg.edit_text(
-                        f"🛰 **MARKET VERİLERİ ANALİZ EDİLİYOR**\n"
-                        f"`{current_bar}`\n\n"
-                        f"🔍 taranıyor: `{item}`\n"
-                        f"✅ Başarılı: `{success_count}` | ⏭️ Hata: `{errors_count}`",
+                        f"💠 **MARKET ANALİZİ YAPILIYOR**\n"
+                        f"{current_bar}\n\n"
+                        f"📡 **İşlem:** `{item}`\n"
+                        f"✨ Başarılı: `{success_count}` | ⚠️ Hata: `{errors_count}`",
                         parse_mode="Markdown"
                     )
                 except: pass
