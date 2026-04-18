@@ -22,20 +22,35 @@ API_KEY = os.getenv("CSFLOAT_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MIN_VOLUME_LIMIT = 50
 
-# --- YARDIMCI FONKSİYONLAR ---
-def generate_progress_bar(current, total):
+# --- PROFESYONEL PROGRESS BAR SİSTEMİ ---
+def generate_pro_bar(current, total, title="İşleniyor"):
+    if total <= 0: return f"| {title} | Hazırlanıyor..."
     bar_length = 15
-    fraction = current / total if total > 0 else 0
+    fraction = current / total
     filled = int(fraction * bar_length)
-    bar = "▬" * filled + "▷" + "─" * (bar_length - filled - 1)
-    percent = int(fraction * 100)
-    return f"◈ {bar} %{percent}"
+    # Profesyonel karakterler
+    bar = "█" * filled + "▒" * (bar_length - filled)
+    percent = round(fraction * 100, 1)
+    
+    return (
+        f"┏━━━━ {title} ━━━━┓\n"
+        f"┃ {bar}  %{percent}\n"
+        f"┗━━━━━━━━━━━━━━━━┛"
+    )
+
+async def interruptible_sleep(seconds, context):
+    """Her 0.5 saniyede bir durdurma kontrolü yaparak bekler."""
+    steps = int(seconds / 0.5)
+    for _ in range(steps):
+        if context.user_data.get('stop_scan'):
+            return True
+        await asyncio.sleep(0.5)
+    return False
 
 def load_items():
     if os.path.exists("items.txt"):
         with open("items.txt", "r", encoding="utf-8") as f:
-            items = [line.strip() for line in f.readlines() if line.strip()]
-            return items
+            return [line.strip() for line in f.readlines() if line.strip()]
     return []
 
 def steam_net_hesapla(buyer_pays):
@@ -70,7 +85,7 @@ async def fetch_item(session, name, idx, total):
             if vol < MIN_VOLUME_LIMIT: return ("SKIP", f"Düşük Hacim ({vol})")
             s_price = float(s_data["lowest_price"].replace("$", "").replace(",", ""))
 
-        await asyncio.sleep(random.uniform(1.5, 3.0))
+        await asyncio.sleep(1) # API arası kısa güvenlik esneme
 
         async with session.get(f_url, headers={"Authorization": API_KEY}, timeout=15) as r_f:
             f_data = await r_f.json()
@@ -79,10 +94,9 @@ async def fetch_item(session, name, idx, total):
             prices = [round(l['price']/100, 2) for l in listings]
             f_price = max(Counter(prices), key=Counter(prices).get)
 
-        logger.info(f"✅ [{idx}/{total}] {name} tarandı.")
         return {"name": name, "s": s_price, "f": f_price, "vol": vol}
-    except Exception as e:
-        return ("RETRY", str(e))
+    except:
+        return ("RETRY", "Hata")
 
 # --- TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,10 +108,9 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
     if text == "🛑 Taramayı Durdur":
-        if context.user_data.get('analyzing'):
-            context.user_data['stop_scan'] = True
-            await update.message.reply_text("⏳ Mevcut item bitince tarama durdurulacak...")
-            return
+        context.user_data['stop_scan'] = True
+        await update.message.reply_text("⛔ DURDURMA SİNYALİ ALINDI. Hemen kesiliyor...", reply_markup=ReplyKeyboardRemove())
+        return
 
     if text in ['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']:
         context.user_data['mode'] = text
@@ -106,59 +119,55 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if 'mode' in context.user_data and 'balance' not in context.user_data:
         try:
-            user_balance = float(text.replace(",", "."))
-            context.user_data['balance'] = user_balance
+            context.user_data['balance'] = float(text.replace(",", "."))
             await update.message.reply_text("📉 Minimum item fiyatı girin ($):")
             return
         except:
-            await update.message.reply_text("❌ Geçerli bir bakiye girin.")
+            await update.message.reply_text("❌ Geçerli bakiye girin.")
             return
 
     if 'balance' in context.user_data and not context.user_data.get('analyzing'):
         try:
-            min_item_price = float(text.replace(",", "."))
-            context.user_data['min_price'] = min_item_price
+            context.user_data['min_price'] = float(text.replace(",", "."))
             context.user_data['analyzing'] = True
             context.user_data['stop_scan'] = False
-            
-            user_balance = context.user_data['balance']
-            mode = context.user_data['mode']
         except:
-            await update.message.reply_text("❌ Geçerli bir minimum fiyat girin.")
+            await update.message.reply_text("❌ Geçerli fiyat girin.")
             return
 
+        # 1. AŞAMA: TELEGRAM BAĞLANTI (SIMULE)
+        conn_msg = await update.message.reply_text(generate_pro_bar(100, 100, "TELEGRAM İSTEĞİ"), parse_mode="Markdown")
+        await asyncio.sleep(1)
+        
+        # 2. AŞAMA: LİSTE HAZIRLAMA
         items_list = load_items()
         total = len(items_list)
-        all_results, errors_count, success_count = [], 0, 0
+        await conn_msg.edit_text(generate_pro_bar(100, 100, "LİSTE HAZIRLANDI"), parse_mode="Markdown")
         
-        stop_kb = [['🛑 Taramayı Durdur']]
-        
-        await update.message.reply_text(f"🛰 **Analiz başladı...**", parse_mode="Markdown")
-        
-        # Başlangıç Progress Bar'ı (Veriler hazırlanıyor yazısı yerine direkt tablo)
-        initial_prog = generate_progress_bar(0, total)
+        # 3. AŞAMA: TARAMA BAŞLANGICI
         status_msg = await update.message.reply_text(
-            f"📊 **Analiz Durumu**\n`{initial_prog}`\n\n"
-            f"✅ Başarılı: 0\n"
-            f"⏭️ Atlanan: 0\n"
-            f"📦 İlerleme: 0/{total}",
-            reply_markup=ReplyKeyboardMarkup(stop_kb, resize_keyboard=True),
+            f"🚀 **TARAMA BAŞLIYOR**\n`Miktar: {total} İtem`",
+            reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True),
             parse_mode="Markdown"
         )
 
+        all_results, success_count, errors_count = [], 0, 0
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
+                # ANINDA DURDURMA KONTROLÜ
                 if context.user_data.get('stop_scan'):
-                    await update.message.reply_text("🛑 Tarama kullanıcı tarafından durduruldu.")
-                    break
+                    await status_msg.edit_text("❌ **İŞLEM KULLANICI TARAFINDAN KESİLDİ**", parse_mode="Markdown")
+                    context.user_data['analyzing'] = False
+                    return
 
                 res = await fetch_item(session, item, i, total)
+                
                 if isinstance(res, tuple) and res[0] == "RETRY":
-                    await asyncio.sleep(20)
+                    if await interruptible_sleep(10, context): continue
                     res = await fetch_item(session, item, i, total)
 
                 if isinstance(res, dict):
-                    check_price = res['f'] if 'CSFloat -> Steam' in mode else res['s']
+                    check_price = res['f'] if 'CSFloat -> Steam' in context.user_data['mode'] else res['s']
                     if check_price >= context.user_data['min_price']:
                         all_results.append(res)
                         success_count += 1
@@ -167,31 +176,36 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     errors_count += 1
 
-                # Her 3 itemda bir veya sonda güncelle
-                if i % 3 == 0 or i == total:
-                    prog_bar = generate_progress_bar(i, total)
-                    new_text = (
-                        f"📊 **Analiz Durumu**\n`{prog_bar}`\n\n"
-                        f"✅ Başarılı (Filtreye Uygun): {success_count}\n"
-                        f"⏭️ Atlanan (Hata/Düşük Fiyat): {errors_count}\n"
-                        f"📦 İlerleme: {i}/{total}"
-                    )
+                # Her 2 itemda bir güncelle (Telegram sınırı için)
+                if i % 2 == 0 or i == total:
+                    bar = generate_pro_bar(i, total, "İTEM TARANIYOR")
                     try:
-                        await status_msg.edit_text(new_text, parse_mode="Markdown")
-                    except: 
-                        pass
+                        await status_msg.edit_text(
+                            f"{bar}\n\n"
+                            f"🟢 Başarılı: `{success_count}`\n"
+                            f"⚪ Filtre dışı/Hata: `{errors_count}`\n"
+                            f"📦 Toplam: `{i}/{total}`",
+                            parse_mode="Markdown"
+                        )
+                    except: pass
                 
-                await asyncio.sleep(random.uniform(5, 10))
+                # Durdurulabilir bekleme
+                if await interruptible_sleep(random.uniform(5, 8), context):
+                    break
 
-        # --- SONUÇ RAPORU ---
+        # SONUÇ RAPORU (Önceki mantıkla aynı, kodun bu kısmı değişmedi)
         final_list = []
+        user_balance = context.user_data['balance']
+        mode = context.user_data['mode']
         for d in all_results:
             if 'CSFloat -> Steam' in mode:
-                buy_from, buy_p, sell_to, sell_p = "CSFloat", d['f'], "Steam", d['s']
+                buy_p, sell_p = d['f'], d['s']
                 net_sell = steam_net_hesapla(sell_p)
+                buy_from, sell_to = "CSFloat", "Steam"
             else:
-                buy_from, buy_p, sell_to, sell_p = "Steam", d['s'], "CSFloat", d['f']
+                buy_p, sell_p = d['s'], d['f']
                 net_sell = round(sell_p * 0.98, 2)
+                buy_from, sell_to = "Steam", "CSFloat"
             
             qty = math.floor(user_balance / buy_p) if buy_p > 0 else 0
             if qty > 0:
@@ -208,37 +222,30 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sorted_res = sorted(final_list, key=lambda x: x['profit'], reverse=True)[:5]
         
         if sorted_res:
-            report = f"🏆 **EN İYİ 5 FIRSAT**\n`{mode}`\n`Bakiye: ${user_balance}`\n`Min Fiyat: ${context.user_data['min_price']}`\n\n"
+            report = f"🏆 **EN İYİ 5 FIRSAT**\n`Bakiye: ${user_balance}`\n\n"
             for idx, item in enumerate(sorted_res, 1):
                 report += (
                     f"{idx}. **{item['name']}**\n"
-                    f"📥 Alış ({item['buy_from']}): `${item['buy']}`\n"
-                    f"📤 Satış ({item['sell_to']}): `${item['sell']}`\n"
-                    f"💰 Net: `${item['net']}` | ROI: `%{item['roi']}`\n"
-                    f"📦 Adet: `{item['qty']}` | **Kâr: +${item['profit']}**\n\n"
+                    f"📥 Alış: `${item['buy']}` ({item['buy_from']})\n"
+                    f"📤 Satış: `${item['sell']}` ({item['sell_to']})\n"
+                    f"💰 Kâr: `${item['profit']}` | ROI: `%{item['roi']}`\n\n"
                 )
             await update.message.reply_text(report, parse_mode="Markdown")
         else:
             await update.message.reply_text("❌ Kârlı fırsat bulunamadı.")
 
         context.user_data['analyzing'] = False
-        post_scan_kb = [['🔄 Yeniden Başlat', '💰 Bakiye Değiştir'], ['🏠 Ana Menü']]
-        await update.message.reply_text(
-            "✅ İşlem tamamlandı. Şimdi ne yapalım?",
-            reply_markup=ReplyKeyboardMarkup(post_scan_kb, resize_keyboard=True)
-        )
+        kb = [['🔄 Yeniden Başlat', '💰 Bakiye Değiştir'], ['🏠 Ana Menü']]
+        await update.message.reply_text("✅ İşlem tamam.", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
     elif text == '🔄 Yeniden Başlat':
         context.user_data['analyzing'] = False
-        await update.message.reply_text(f"🔄 Mevcut ayarlarla devam ediliyor...")
         await handle_msg(update, context)
-        
     elif text == '💰 Bakiye Değiştir':
         mode = context.user_data.get('mode')
         context.user_data.clear()
         context.user_data['mode'] = mode
-        await update.message.reply_text("💰 Yeni bakiye girin ($):", reply_markup=ReplyKeyboardRemove())
-        
+        await update.message.reply_text("💰 Yeni bakiye ($):", reply_markup=ReplyKeyboardRemove())
     elif text == '🏠 Ana Menü':
         await start(update, context)
 
