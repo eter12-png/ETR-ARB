@@ -25,7 +25,7 @@ MIN_VOLUME_LIMIT = 50
 # --- YARDIMCI FONKSİYONLAR ---
 def generate_progress_bar(current, total):
     bar_length = 15
-    fraction = current / total
+    fraction = current / total if total > 0 else 0
     filled = int(fraction * bar_length)
     bar = "▬" * filled + "▷" + "─" * (bar_length - filled - 1)
     percent = int(fraction * 100)
@@ -133,13 +133,17 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         stop_kb = [['🛑 Taramayı Durdur']]
         
-        # 1. Mesaj: Sabit Bildirim
         await update.message.reply_text(f"🛰 **Analiz başladı...**", parse_mode="Markdown")
         
-        # 2. Mesaj: Güncellenen Progress Bar Mesajı
+        # Başlangıç Progress Bar'ı (Veriler hazırlanıyor yazısı yerine direkt tablo)
+        initial_prog = generate_progress_bar(0, total)
         status_msg = await update.message.reply_text(
-            "⏳ Veriler hazırlanıyor...", 
-            reply_markup=ReplyKeyboardMarkup(stop_kb, resize_keyboard=True)
+            f"📊 **Analiz Durumu**\n`{initial_prog}`\n\n"
+            f"✅ Başarılı: 0\n"
+            f"⏭️ Atlanan: 0\n"
+            f"📦 İlerleme: 0/{total}",
+            reply_markup=ReplyKeyboardMarkup(stop_kb, resize_keyboard=True),
+            parse_mode="Markdown"
         )
 
         async with aiohttp.ClientSession() as session:
@@ -163,6 +167,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     errors_count += 1
 
+                # Her 3 itemda bir veya sonda güncelle
                 if i % 3 == 0 or i == total:
                     prog_bar = generate_progress_bar(i, total)
                     new_text = (
@@ -172,9 +177,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"📦 İlerleme: {i}/{total}"
                     )
                     try:
-                        # 400 Bad Request hatasını önlemek için içerik kontrolü
-                        if status_msg.text != new_text:
-                            await status_msg.edit_text(new_text, parse_mode="Markdown")
+                        await status_msg.edit_text(new_text, parse_mode="Markdown")
                     except: 
                         pass
                 
