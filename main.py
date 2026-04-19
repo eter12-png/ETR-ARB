@@ -118,51 +118,19 @@ async def fetch_item(session, name):
     except:
         return ("RETRY", "Hata")
 
-# --- TELEGRAM ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']]
-    await update.message.reply_text("🚀 İşlem yönü seçin:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+# --- YENİ: ARKA PLAN TARAMA GÖREVİ ---
+async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_list: list, user_balance: float):
+    total = len(items_list)
+    all_results, success_count = [], 0
 
-async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    await update.message.reply_text(
+        f"🔎 **{total}** item taranıyor... Lütfen bekleyin.",
+        reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True)
+    )
 
-    if text == "🛑 Taramayı Durdur":
-        context.user_data['stop_scan'] = True
-        return
-
-    if text in ['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']:
-        context.user_data['mode'] = text
-        await update.message.reply_text("💰 Bakiye girin ($):", reply_markup=ReplyKeyboardRemove())
-        return
-
-    if 'mode' in context.user_data and not context.user_data.get('analyzing'):
-        try:
-            user_balance = float(text.replace(",", "."))
-            context.user_data['analyzing'] = True
-            context.user_data['stop_scan'] = False
-        except:
-            await update.message.reply_text("❌ Sayı girin.")
-            return
-
-        items_list = load_items()
-        if not items_list:
-            await update.message.reply_text("❌ items.txt boş veya bulunamadı.")
-            context.user_data['analyzing'] = False
-            return
-
-        total = len(items_list)
-        all_results, success_count = [], 0
-
-        await update.message.reply_text(
-            f"🔎 **{total}** item taranıyor... Lütfen bekleyin.",
-            reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True)
-        )
-
+    try:
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
-                if context.user_data.get('stop_scan'):
-                    break
-
                 # Konsola yazdır (Telegram'ı yormamak için)
                 logger.info(f"[{i}/{total}] Taranıyor: {item}")
 
@@ -176,7 +144,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     all_results.append(res)
                     success_count += 1
 
-                # Her 10 itemda bir Telegram'a küçük bir güncelleme atalım (edit değil yeni mesaj)
+                # Her 10 itemda bir Telegram'a küçük bir güncelleme atalım
                 if i % 10 == 0:
                     await update.message.reply_text(
                         f"⏳ İlerleme: {generate_progress_bar(i, total)}",
@@ -218,8 +186,63 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data['analyzing'] = False
         await update.message.reply_text(
-            "✅ İşlem bitti.",
+            "✅ İşlem bitti. Şimdi ne yapalım?",
             reply_markup=ReplyKeyboardMarkup([['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']], resize_keyboard=True)
+        )
+
+    except asyncio.CancelledError:
+        # task.cancel() tetiklendiğinde döngü anında kesilip buraya düşer
+        pass
+    except Exception as e:
+        logger.error(f"Tarama sırasında hata: {e}")
+        context.user_data['analyzing'] = False
+
+
+# --- TELEGRAM ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = [['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']]
+    await update.message.reply_text("🚀 İşlem yönü seçin:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+
+async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+
+    # 1. ANINDA DURDURMA MANTIĞI
+    if text == "🛑 Taramayı Durdur":
+        task = context.user_data.get('scan_task')
+        if task and not task.done():
+            task.cancel()  # Arka plandaki taramayı anında imha eder
+        
+        context.user_data['analyzing'] = False
+        
+        kb = [['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']]
+        await update.message.reply_text(
+            "🛑 Tarama durduruldu.\n\nŞimdi ne yapalım?",
+            reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True)
+        )
+        return
+
+    if text in ['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']:
+        context.user_data['mode'] = text
+        await update.message.reply_text("💰 Bakiye girin ($):", reply_markup=ReplyKeyboardRemove())
+        return
+
+    if 'mode' in context.user_data and not context.user_data.get('analyzing'):
+        try:
+            user_balance = float(text.replace(",", "."))
+            context.user_data['analyzing'] = True
+        except ValueError:
+            await update.message.reply_text("❌ Sayı girin.")
+            return
+
+        items_list = load_items()
+        if not items_list:
+            await update.message.reply_text("❌ items.txt boş veya bulunamadı.")
+            context.user_data['analyzing'] = False
+            return
+
+        # 2. GÖREVİ ARKA PLANDA BAŞLATMA
+        context.user_data['scan_task'] = asyncio.create_task(
+            run_scan(update, context, items_list, user_balance)
         )
 
 if __name__ == "__main__":
