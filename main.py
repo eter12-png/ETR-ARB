@@ -3,7 +3,6 @@ import aiohttp
 import math
 import urllib.parse
 import os
-import random
 import logging
 import time
 from datetime import datetime
@@ -22,32 +21,12 @@ MIN_VOLUME_LIMIT = 50
 VOLUME_LIMIT_PERCENT = 0.15
 MAX_BUDGET_PER_ITEM = 0.30
 
-# --- PROFESYONEL PROGRESS BAR ---
-def generate_progress_bar(current, total):
-    if total <= 0: return "⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ %0"
-    bar_length = 10 
-    fraction = current / total
-    filled = int(fraction * bar_length)
-    filled_char = "🟥" if fraction < 0.30 else "🟧" if fraction < 0.70 else "🟩" if fraction < 0.99 else "✅"
-    bar = filled_char * filled + "⬜" * (bar_length - filled)
-    return f"💠 **İlerleme:** {bar} `%{int(fraction * 100)}`"
-
-# --- ASENKRON EDİT (TARAMAYI DURDURMAZ) ---
-async def safe_edit(message, text):
-    try:
-        # Arka planda çalışır, ana döngüyü bloklamaz
-        await message.edit_text(text, parse_mode="Markdown")
-    except Exception:
-        # Hata olsa bile sessiz kal, tarama devam etsin
-        pass
-
 def load_items():
     if os.path.exists("items.txt"):
         with open("items.txt", "r", encoding="utf-8") as f:
             return [line.strip() for line in f.readlines() if line.strip()]
     return []
 
-# (Birim kar ve sepet hesaplama fonksiyonları aynı - Değişmedi)
 def steam_net_hesapla(buyer_pays):
     if buyer_pays < 0.03: return 0
     seller_gets = math.floor(buyer_pays / 1.15 * 100) / 100
@@ -83,7 +62,7 @@ async def fetch_item(session, name):
     f_url = f"https://csfloat.com/api/v1/listings?market_hash_name={safe_name}&limit=50&sort_by=lowest_price&type=buy_now"
     try:
         async with session.get(s_url, headers=headers, timeout=10) as r_s:
-            if r_s.status == 429: return ("RETRY", "429")
+            if r_s.status == 429: return "RETRY"
             s_data = await r_s.json()
             if not s_data or "lowest_price" not in s_data: return None
             vol = int(str(s_data.get("volume", "0")).replace(",", "")) if str(s_data.get("volume", "0")).replace(",", "").isdigit() else 0
@@ -121,37 +100,31 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         items_list = load_items()
         total = len(items_list)
-        status_msg = await update.message.reply_text(f"💠 **TARAMA BAŞLADI**\n{generate_progress_bar(0, total)}", 
-                                                     reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True),
-                                                     parse_mode="Markdown")
+        await update.message.reply_text(f"🏁 **TARAMA BAŞLADI**\nToplam: `{total}` item.\nHer 50 itemda bir rapor vereceğim.", 
+                                        reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True),
+                                        parse_mode="Markdown")
 
-        all_results, last_upd, last_pct = [], 0, -1
+        all_results = []
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
                 if context.user_data.get('stop_scan'): break
                 
-                # İLERLEME GÜNCELLEME (ARKA PLANDA)
-                pct = int((i / total) * 100)
-                if (pct % 5 == 0 and pct != last_pct) or (time.time() - last_upd > 20):
-                    # create_task kullanarak editlemeyi beklemeyi bırakıyoruz!
-                    txt = f"💠 **TARAMA YAPILIYOR**\n{generate_progress_bar(i, total)}\n📡 **İtem:** `{item}`"
-                    asyncio.create_task(safe_edit(status_msg, txt))
-                    last_upd, last_pct = time.time(), pct
+                # Her 50 itemda bir yeni mesaj at (Daha güvenli ve hızlı)
+                if i % 50 == 0:
+                    await update.message.reply_text(f"📊 **Durum:** `{i}/{total}` tamamlandı.\n🔍 Bulunan Fırsat: `{len(all_results)}`", parse_mode="Markdown")
 
-                # ASIL İŞ BURASI: Item çekme işlemi asla Telegram editlemesine takılmaz
                 res = await fetch_item(session, item)
-                if res: all_results.append(res)
+                if res == "RETRY":
+                    await asyncio.sleep(20) # Limit yendiyse bekle
+                elif res:
+                    all_results.append(res)
                 
-                # Durdurma kontrolü için kısa beklemeler
-                for _ in range(3):
-                    if context.user_data.get('stop_scan'): break
-                    await asyncio.sleep(1)
+                # Çok kısa bir es (Telegram'ın mesaj yakalaması için)
+                await asyncio.sleep(0.5)
 
-        # Sonuç raporlama...
         if context.user_data.get('stop_scan'):
-            await update.message.reply_text("🛑 Durduruldu.", reply_markup=ReplyKeyboardMarkup([['🏠 Ana Menü']], resize_keyboard=True))
+            await update.message.reply_text("🛑 İşlem kullanıcı tarafından durduruldu.")
         else:
-            # Analiz hesaplamaları
             final_list = []
             for d in all_results:
                 if 'CSFloat -> Steam' in context.user_data['mode']:
@@ -164,12 +137,13 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             sepet, harcanan = create_balanced_basket(final_list, user_balance)
             if sepet:
-                report = f"⚖️ **ALIM SEPETİ** (${harcanan})\n\n" + "\n".join([f"{idx+1}. **{it['name']}** - `{it['final_qty']} Adet` (%{it['roi']} Kar)" for idx, it in enumerate(sepet)])
+                report = f"⚖️ **ANALİZ TAMAMLANDI** (${harcanan})\n\n" + "\n".join([f"{idx+1}. **{it['name']}** - `{it['final_qty']} Adet` (%{it['roi']} Kar)" for idx, it in enumerate(sepet)])
                 await update.message.reply_text(report, parse_mode="Markdown")
             else:
                 await update.message.reply_text("❌ Kârlı ürün bulunamadı.")
         
         context.user_data['analyzing'] = False
+        await update.message.reply_text("🏁 Yeni tarama için bakiye girin veya yön seçin.")
 
 if __name__ == "__main__":
     app = Application.builder().token(TELEGRAM_TOKEN).build()
