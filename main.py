@@ -93,7 +93,7 @@ async def fetch_item(session, name):
             s_price = float(s_data["lowest_price"].replace("$", "").replace(",", ""))
 
         # CSFloat Çekimi
-        async with session.get(f_url, headers={"Authorization": API_KEY}, timeout=10) as r_f:
+        async with session.get(f_url, headers={"Authorization": f"Bearer {API_KEY}"}, timeout=10) as r_f:
             f_data = await r_f.json()
             listings = f_data if isinstance(f_data, list) else f_data.get('data', [])
             if not listings: return ("SKIP", "İlan Yok")
