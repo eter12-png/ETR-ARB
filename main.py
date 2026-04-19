@@ -5,6 +5,7 @@ import urllib.parse
 import os
 import random
 import logging
+import time
 from datetime import datetime
 from collections import Counter
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -100,12 +101,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    # --- DURDURMA MANTIĞI ---
     if text == "🛑 Taramayı Durdur":
         if context.user_data.get('analyzing'):
             context.user_data['stop_scan'] = True
-            # Kullanıcıya anında geri bildirim veriyoruz
-            await update.message.reply_text("⛔ Tarama durduruluyor... Lütfen bekleyin.")
+            await update.message.reply_text("⛔ Tarama durduruluyor...")
         return
 
     if text in ['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']:
@@ -129,42 +128,41 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-        all_results, success_count, last_pct = [], 0, -1
+        all_results, last_update_time, last_pct = [], 0, -1
+        
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
-                # Her item başında ve sonunda kontrol et
-                if context.user_data.get('stop_scan'): 
-                    break
+                if context.user_data.get('stop_scan'): break
                 
                 pct = int((i / total) * 100)
-                if pct != last_pct:
+                # Sadece her %5'lik dilimde ve en az 15 saniye geçtiyse edit yap
+                if (pct % 5 == 0 and pct != last_pct) or (time.time() - last_update_time > 15):
                     try:
-                        await status_msg.edit_text(f"💠 **TARAMA YAPILIYOR**\n{generate_progress_bar(i, total)}\n📡 **İtem:** `{item}`", parse_mode="Markdown")
+                        await status_msg.edit_text(
+                            f"💠 **TARAMA YAPILIYOR**\n{generate_progress_bar(i, total)}\n"
+                            f"📡 **Son İtem:** `{item}`\n📈 Bulunan: `{len(all_results)}`",
+                            parse_mode="Markdown"
+                        )
+                        last_update_time = time.time()
                         last_pct = pct
-                    except: pass
+                    except Exception as e:
+                        logger.warning(f"Edit atlandı: {e}")
 
                 res = await fetch_item(session, item)
                 if isinstance(res, dict):
                     all_results.append(res)
-                    success_count += 1
                 
-                # Bekleme süresini küçük parçalara bölerek durdurma butonunu dinliyoruz
-                for _ in range(5): 
+                # Dinamik durdurma dinlemesi
+                for _ in range(5):
                     if context.user_data.get('stop_scan'): break
                     await asyncio.sleep(1)
 
-        # --- DURDURULDUYSA VEYA BİTTİYSE ---
         if context.user_data.get('stop_scan'):
             context.user_data['analyzing'] = False
-            kb = [['🔄 Yeniden Başlat', '🏠 Ana Menü']]
-            await update.message.reply_text(
-                f"🛑 **TARAMA DURDURULDU!**\n\nŞu ana kadar `{i}` item kontrol edildi.\nŞimdi ne yapmak istersin?",
-                reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True),
-                parse_mode="Markdown"
-            )
+            await update.message.reply_text("🛑 Tarama durduruldu. Menüden seçim yapın.", reply_markup=ReplyKeyboardMarkup([['🔄 Yeniden Başlat', '🏠 Ana Menü']], resize_keyboard=True))
             return
 
-        # --- NORMAL BİTİŞ RAPORU ---
+        # Analiz ve Raporlama kısmı aynı kalıyor...
         final_list = []
         for d in all_results:
             if 'CSFloat -> Steam' in context.user_data['mode']:
@@ -185,9 +183,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['analyzing'] = False
         await update.message.reply_text("✅ İşlem bitti.", reply_markup=ReplyKeyboardMarkup([['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']], resize_keyboard=True))
 
-    elif text == '🔄 Yeniden Başlat':
-        await start(update, context)
-    elif text == '🏠 Ana Menü':
+    elif text in ['🔄 Yeniden Başlat', '🏠 Ana Menü']:
         await start(update, context)
 
 if __name__ == "__main__":
