@@ -18,6 +18,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# HTTP isteklerinin log spamını engellemek için
+logging.getLogger("httpx").setLevel(logging.WARNING) 
+
 # --- AYARLAR ---
 API_KEY = os.getenv("CSFLOAT_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -40,7 +43,7 @@ def generate_status_text(current, total, success, error):
     remaining = total - current
     
     return (
-        f"📊 **Analiz Durumu**\n"
+        f"📊 *Analiz Durumu*\n"
         f"┣ {bar} %{percent}\n\n"
         f"✅ Başarılı: `{success}`\n"
         f"❌ Hatalı/Atlanan: `{error}`\n"
@@ -118,11 +121,17 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_lis
     total = len(items_list)
     all_results, success_count, error_count = [], 0, 0
 
-    # Progress bar mesajını bir kez gönderiyoruz
+    # 1. Önce "Durdur" butonunu aktif etmek için kısa bir mesaj atıyoruz
+    await update.message.reply_text(
+        "⏳ Tarama işlemi başlatılıyor...",
+        reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True)
+    )
+
+    # 2. Progress bar için SAF (butonsuz) bir mesaj gönderiyoruz. 
+    # Editlenecek mesaj bu olacak.
     status_msg = await update.message.reply_text(
         generate_status_text(0, total, 0, 0),
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True)
+        parse_mode="Markdown"
     )
 
     try:
@@ -165,10 +174,10 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_lis
 
         sepet, harcanan = create_balanced_basket(final_list, user_balance)
         if sepet:
-            report = f"⚖️ **RİSK DENGELİ ALIM SEPETİ**\nBakiye: ${harcanan} / ${user_balance}\n\n"
+            report = f"⚖️ *RİSK DENGELİ ALIM SEPETİ*\nBakiye: ${harcanan} / ${user_balance}\n\n"
             for idx, item in enumerate(sepet, 1):
-                report += f"{idx}. **{item['name']}**\n📦 {item['final_qty']} Adet | Kâr: +${item['total_profit']} (%{item['roi']})\n"
-            report += f"\n📈 **TOPLAM KÂR: ${round(sum(i['total_profit'] for i in sepet), 2)}**"
+                report += f"{idx}. *{item['name']}*\n📦 {item['final_qty']} Adet | Kâr: +${item['total_profit']} (%{item['roi']})\n"
+            report += f"\n📈 *TOPLAM KÂR: ${round(sum(i['total_profit'] for i in sepet), 2)}*"
             await update.message.reply_text(report, parse_mode="Markdown")
         else:
             await update.message.reply_text("❌ Kârlı fırsat yok.")
