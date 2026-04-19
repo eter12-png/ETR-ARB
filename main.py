@@ -67,20 +67,13 @@ def steam_net_hesapla(buyer_pays):
 def create_balanced_basket(final_list, total_balance):
     basket = []
     remaining_balance = total_balance
-    # Kâr marjı (ROI) en yüksek olan itemları en başa alıyoruz
     sorted_items = sorted(final_list, key=lambda x: x['roi'], reverse=True)
     
     for item in sorted_items:
         if remaining_balance <= 0.05: break
-        
-        # 1. Kısıt: Günlük hacim sınırı (Piyasayı bozmamak için)
         max_qty_by_vol = math.floor(item['vol'] * VOLUME_LIMIT_PERCENT)
-        
-        # 2. Kısıt: Tek iteme bütçe sınırı (Risk dağıtımı için)
         max_budget_for_this_item = total_balance * MAX_BUDGET_PER_ITEM
         max_qty_by_budget = math.floor(min(remaining_balance, max_budget_for_this_item) / item['buy'])
-        
-        # İki kısıttan en düşük olanı alıyoruz
         final_qty = min(max_qty_by_vol, max_qty_by_budget)
         
         if final_qty > 0:
@@ -114,7 +107,7 @@ async def fetch_item(session, name, idx, total):
             if vol < MIN_VOLUME_LIMIT: return ("SKIP", f"Düşük Hacim ({vol})")
             s_price = float(s_data["lowest_price"].replace("$", "").replace(",", ""))
 
-        await asyncio.sleep(random.uniform(1.5, 3.0))
+        await asyncio.sleep(random.uniform(1.0, 2.0))
 
         async with session.get(f_url, headers={"Authorization": API_KEY}, timeout=15) as r_f:
             f_data = await r_f.json()
@@ -168,23 +161,29 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
+        last_update_text = ""
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
                 if context.user_data.get('stop_scan'):
                     await status_msg.edit_text("🛑 **Tarama kullanıcı tarafından durduruldu.**")
                     break
 
-                try:
-                    await status_msg.edit_text(
-                        f"💠 **MARKET ANALİZİ YAPILIYOR**\n{generate_progress_bar(i-1, total)}\n\n"
-                        f"📡 **İşlem:** `{item}`\n✨ Başarılı: `{success_count}` | ⚠️ Hata: `{errors_count}`",
-                        parse_mode="Markdown"
-                    )
-                except: pass
+                # Hata 400 önlemi: Sadece metin değişirse güncelle
+                current_text = (
+                    f"💠 **MARKET ANALİZİ YAPILIYOR**\n{generate_progress_bar(i-1, total)}\n\n"
+                    f"📡 **İşlem:** `{item}`\n✨ Başarılı: `{success_count}` | ⚠️ Hata: `{errors_count}`"
+                )
+                
+                if current_text != last_update_text:
+                    try:
+                        await status_msg.edit_text(current_text, parse_mode="Markdown")
+                        last_update_text = current_text
+                    except Exception as e:
+                        logger.error(f"Telegram Edit Hatası: {e}")
 
                 res = await fetch_item(session, item, i, total)
                 if isinstance(res, tuple) and res[0] == "RETRY":
-                    await asyncio.sleep(15)
+                    await asyncio.sleep(20)
                     res = await fetch_item(session, item, i, total)
 
                 if isinstance(res, dict):
