@@ -127,11 +127,18 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'mode' in context.user_data and not context.user_data.get('analyzing'):
         try:
             user_balance = float(text.replace(",", "."))
-            context.user_data['analyzing'] = True
-            context.user_data['stop_scan'] = False
         except:
             await update.message.reply_text("❌ Sayı girin.")
             return
+
+        # Eğer kullanıcı tarama başlamadan "Durdur" gönderdiyse iptal et
+        if context.user_data.get('stop_scan'):
+            context.user_data['stop_scan'] = False
+            await update.message.reply_text("⚠️ Önceki durdurma komutu temizlendi. Tekrar bakiye girin.")
+            return
+
+        context.user_data['analyzing'] = True
+        context.user_data['stop_scan'] = False
 
         items_list = load_items()
         if not items_list:
