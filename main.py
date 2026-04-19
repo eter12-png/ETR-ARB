@@ -10,8 +10,11 @@ from collections import Counter
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- LOGGING ---
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+# --- LOGGING YAPILANDIRMASI ---
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 # --- AYARLAR ---
@@ -21,32 +24,24 @@ MIN_VOLUME_LIMIT = 50
 VOLUME_LIMIT_PERCENT = 0.15
 MAX_BUDGET_PER_ITEM = 0.30
 
-# --- YENİ PROFESYONEL PROGRESS BAR ---
+# --- YARDIMCI FONKSİYONLAR ---
 def generate_progress_bar(current, total):
     if total <= 0: return "⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ %0"
     bar_length = 10 
     fraction = current / total
     filled = int(fraction * bar_length)
-    
-    # Renk geçişli bar
-    if fraction < 0.30:
-        filled_char = "🟥"
-    elif fraction < 0.70:
-        filled_char = "🟧"
-    elif fraction < 0.99:
-        filled_char = "🟩"
-    else:
-        filled_char = "✅"
-        
-    bar = filled_char * filled + "⬜" * (bar_length - filled)
+    color_block = "🟩" if fraction < 0.99 else "✅"
+    bar = color_block * filled + "⬜" * (bar_length - filled)
     percent = int(fraction * 100)
-    
-    return f"💠 **İlerleme:** {bar} `%{percent}`"
+    return f"┣ {bar}  `%{percent}`"
 
 def load_items():
     if os.path.exists("items.txt"):
         with open("items.txt", "r", encoding="utf-8") as f:
-            return [line.strip() for line in f.readlines() if line.strip()]
+            lines = [line.strip() for line in f.readlines() if line.strip()]
+            logger.info(f"Dosyadan {len(lines)} item yüklendi.")
+            return lines
+    logger.error("items.txt dosyası bulunamadı!")
     return []
 
 def steam_net_hesapla(buyer_pays):
@@ -80,41 +75,52 @@ def create_balanced_basket(final_list, total_balance):
             remaining_balance -= cost
     return basket, round(total_balance - remaining_balance, 2)
 
+# --- VERİ ÇEKME ---
 async def fetch_item(session, name):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
     safe_name = urllib.parse.quote(name)
     s_url = f"https://steamcommunity.com/market/priceoverview/?appid=730&currency=1&market_hash_name={safe_name}"
     f_url = f"https://csfloat.com/api/v1/listings?market_hash_name={safe_name}&limit=50&sort_by=lowest_price&type=buy_now"
+
     try:
+        # Steam Çekimi
         async with session.get(s_url, headers=headers, timeout=10) as r_s:
             if r_s.status == 429: return ("RETRY", "429")
             s_data = await r_s.json()
-            if not s_data or "lowest_price" not in s_data: return ("SKIP", "Fiyat Yok")
+            if not s_data or "lowest_price" not in s_data: return ("SKIP", "Yok")
             vol = int(str(s_data.get("volume", "0")).replace(",", "")) if str(s_data.get("volume", "0")).replace(",", "").isdigit() else 0
             if vol < MIN_VOLUME_LIMIT: return ("SKIP", "Düşük Hacim")
             s_price = float(s_data["lowest_price"].replace("$", "").replace(",", ""))
+
+        # CSFloat Çekimi
         async with session.get(f_url, headers={"Authorization": API_KEY}, timeout=10) as r_f:
             f_data = await r_f.json()
             listings = f_data if isinstance(f_data, list) else f_data.get('data', [])
             if not listings: return ("SKIP", "İlan Yok")
             prices = [round(l['price']/100, 2) for l in listings]
             f_price = max(Counter(prices), key=Counter(prices).get)
-        return {"name": name, "s": s_price, "f": f_price, "vol": vol}
-    except: return ("RETRY", "Hata")
 
+        return {"name": name, "s": s_price, "f": f_price, "vol": vol}
+    except:
+        return ("RETRY", "Hata")
+
+# --- TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']]
     await update.message.reply_text("🚀 İşlem yönü seçin:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+
     if text == "🛑 Taramayı Durdur":
         context.user_data['stop_scan'] = True
         return
+
     if text in ['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']:
         context.user_data['mode'] = text
         await update.message.reply_text("💰 Bakiye girin ($):", reply_markup=ReplyKeyboardRemove())
         return
+
     if 'mode' in context.user_data and not context.user_data.get('analyzing'):
         try:
             user_balance = float(text.replace(",", "."))
@@ -125,38 +131,25 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         items_list = load_items()
-        total = len(items_list)
-        if total == 0:
-            await update.message.reply_text("❌ items.txt boş.")
+        if not items_list:
+            await update.message.reply_text("❌ items.txt boş veya bulunamadı.")
             context.user_data['analyzing'] = False
             return
 
-        # İLK DURUM MESAJI (Bunu sürekli güncelleyeceğiz)
-        status_msg = await update.message.reply_text(
-            f"💠 **PİYASA TARAMASI BAŞLADI**\n{generate_progress_bar(0, total)}\n\n"
-            f"📦 Toplam Item: `{total}`\n📡 Durum: `Hazırlanıyor...`",
-            reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True),
-            parse_mode="Markdown"
-        )
+        total = len(items_list)
+        all_results, success_count = [], 0
+        
+        await update.message.reply_text(f"🔎 **{total}** item taranıyor... Lütfen bekleyin.", reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True))
 
-        all_results, success_count, last_logged_percent = [], 0, -1
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
                 if context.user_data.get('stop_scan'): break
                 
-                # Sadece yüzde değişirse edit yap (Telegram hatasını ve mesaj kirliliğini önler)
-                current_percent = int((i / total) * 100)
-                if current_percent != last_logged_percent:
-                    try:
-                        await status_msg.edit_text(
-                            f"💠 **PİYASA TARAMASI YAPILIYOR**\n{generate_progress_bar(i, total)}\n\n"
-                            f"📡 **Taranan:** `{item}`\n✅ Başarılı: `{success_count}`",
-                            parse_mode="Markdown"
-                        )
-                        last_logged_percent = current_percent
-                    except: pass # Metin aynıysa hata alma
-
+                # Konsola yazdır (Telegram'ı yormamak için)
+                logger.info(f"[{i}/{total}] Taranıyor: {item}")
+                
                 res = await fetch_item(session, item)
+                
                 if isinstance(res, tuple) and res[0] == "RETRY":
                     await asyncio.sleep(10)
                     res = await fetch_item(session, item)
@@ -165,6 +158,10 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     all_results.append(res)
                     success_count += 1
                 
+                # Her 10 itemda bir Telegram'a küçük bir güncelleme atalım (edit değil yeni mesaj)
+                if i % 10 == 0:
+                    await update.message.reply_text(f"⏳ İlerleme: {generate_progress_bar(i, total)}", parse_mode="Markdown")
+
                 await asyncio.sleep(random.uniform(3, 5))
 
         # --- SEPET ANALİZİ ---
@@ -174,6 +171,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 buy_p, sell_p, net_sell = d['f'], d['s'], steam_net_hesapla(d['s'])
             else:
                 buy_p, sell_p, net_sell = d['s'], d['f'], round(d['f'] * 0.98, 2)
+            
             roi = round(((net_sell - buy_p) / buy_p) * 100, 1) if buy_p > 0 else 0
             if net_sell > buy_p:
                 final_list.append({'name': d['name'], 'buy': buy_p, 'sell': sell_p, 'net': net_sell, 'roi': roi, 'vol': d['vol']})
@@ -187,10 +185,10 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             report += f"\n📈 **TOPLAM KÂR: ${round(sum(i['total_profit'] for i in sepet), 2)}**"
             await update.message.reply_text(report, parse_mode="Markdown")
         else:
-            await update.message.reply_text("❌ Kârlı fırsat bulunamadı.")
+            await update.message.reply_text("❌ Kârlı fırsat yok.")
 
         context.user_data['analyzing'] = False
-        await update.message.reply_text("✅ Analiz tamamlandı.", reply_markup=ReplyKeyboardMarkup([['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']], resize_keyboard=True))
+        await update.message.reply_text("✅ İşlem bitti.", reply_markup=ReplyKeyboardMarkup([['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']], resize_keyboard=True))
 
 if __name__ == "__main__":
     app = Application.builder().token(TELEGRAM_TOKEN).build()
