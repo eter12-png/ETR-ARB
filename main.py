@@ -27,7 +27,7 @@ MAX_BUDGET_PER_ITEM = 0.30
 # --- YARDIMCI FONKSİYONLAR ---
 def generate_progress_bar(current, total):
     if total <= 0: return "⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ %0"
-    bar_length = 10 
+    bar_length = 10
     fraction = current / total
     filled = int(fraction * bar_length)
     color_block = "🟩" if fraction < 0.99 else "✅"
@@ -101,7 +101,10 @@ async def fetch_item(session, name):
             f_price = max(Counter(prices), key=Counter(prices).get)
 
         return {"name": name, "s": s_price, "f": f_price, "vol": vol}
-    except:
+
+    # DEĞİŞİKLİK 1: Hataları artık logluyoruz, sessizce yutmuyoruz
+    except Exception as e:
+        logger.error(f"HATA: {name} | {e}")
         return ("RETRY", "Hata")
 
 # --- TELEGRAM ---
@@ -138,46 +141,67 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         total = len(items_list)
         all_results, success_count = [], 0
-        
+        skip_count = 0
+        error_count = 0
+
         await update.message.reply_text(f"🔎 **{total}** item taranıyor... Lütfen bekleyin.", reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True))
 
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
-                if context.user_data.get('stop_scan'): break
-                
-                # Konsola yazdır (Telegram'ı yormamak için)
+                if context.user_data.get('stop_scan'):
+                    await update.message.reply_text("🛑 Tarama durduruldu.")
+                    break
+
                 logger.info(f"[{i}/{total}] Taranıyor: {item}")
-                
+
                 res = await fetch_item(session, item)
-                
+
                 if isinstance(res, tuple) and res[0] == "RETRY":
+                    # DEĞİŞİKLİK 2: Kısa bekleme sonrası tekrar dene
                     await asyncio.sleep(10)
                     res = await fetch_item(session, item)
 
                 if isinstance(res, dict):
                     all_results.append(res)
                     success_count += 1
-                
-                # Her 10 itemda bir Telegram'a küçük bir güncelleme atalım (edit değil yeni mesaj)
+                elif isinstance(res, tuple):
+                    skip_count += 1
+                    logger.info(f"ATLANDI: {item} | Sebep: {res[1]}")
+
                 if i % 10 == 0:
                     await update.message.reply_text(f"⏳ İlerleme: {generate_progress_bar(i, total)}", parse_mode="Markdown")
 
-                await asyncio.sleep(random.uniform(3, 5))
+                # DEĞİŞİKLİK 3: Sleep'i parçalara böldük — "Durdur" komutu anında çalışsın
+                sleep_duration = random.uniform(3, 5)
+                steps = int(sleep_duration * 10)
+                for _ in range(steps):
+                    if context.user_data.get('stop_scan'):
+                        break
+                    await asyncio.sleep(0.1)
 
         # --- SEPET ANALİZİ ---
         final_list = []
+        eliminated_count = 0
+
         for d in all_results:
             if 'CSFloat -> Steam' in context.user_data['mode']:
                 buy_p, sell_p, net_sell = d['f'], d['s'], steam_net_hesapla(d['s'])
             else:
                 buy_p, sell_p, net_sell = d['s'], d['f'], round(d['f'] * 0.98, 2)
-            
+
             roi = round(((net_sell - buy_p) / buy_p) * 100, 1) if buy_p > 0 else 0
+
             if net_sell > buy_p:
                 final_list.append({'name': d['name'], 'buy': buy_p, 'sell': sell_p, 'net': net_sell, 'roi': roi, 'vol': d['vol']})
+            else:
+                # DEĞİŞİKLİK 4: Neden elendi artık loglarda görünüyor
+                eliminated_count += 1
+                logger.info(f"ELENDİ: {d['name']} | Alış: {buy_p} | Net: {net_sell} | ROI: %{roi}")
+
+        logger.info(f"Özet → Taranan: {success_count} | Kârlı: {len(final_list)} | Elenen: {eliminated_count} | Atlanan: {skip_count}")
 
         sepet, harcanan = create_balanced_basket(final_list, user_balance)
-        
+
         if sepet:
             report = f"⚖️ **RİSK DENGELİ ALIM SEPETİ**\n`Bakiye: ${harcanan} / ${user_balance}`\n\n"
             for idx, item in enumerate(sepet, 1):
@@ -185,7 +209,15 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             report += f"\n📈 **TOPLAM KÂR: ${round(sum(i['total_profit'] for i in sepet), 2)}**"
             await update.message.reply_text(report, parse_mode="Markdown")
         else:
-            await update.message.reply_text("❌ Kârlı fırsat yok.")
+            # DEĞİŞİKLİK 5: Neden kârlı fırsat olmadığına dair özet Telegram'a da geliyor
+            await update.message.reply_text(
+                f"❌ Kârlı fırsat yok.\n\n"
+                f"📊 *Tarama özeti:*\n"
+                f"• Fiyat çekilen: `{success_count}` item\n"
+                f"• Kârsız elenen: `{eliminated_count}` item\n"
+                f"• Atlanan (hacim/ilan yok): `{skip_count}` item",
+                parse_mode="Markdown"
+            )
 
         context.user_data['analyzing'] = False
         await update.message.reply_text("✅ İşlem bitti.", reply_markup=ReplyKeyboardMarkup([['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']], resize_keyboard=True))
