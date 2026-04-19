@@ -21,16 +21,16 @@ logger = logging.getLogger(__name__)
 API_KEY = os.getenv("CSFLOAT_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MIN_VOLUME_LIMIT = 50
+VOLUME_LIMIT_PERCENT = 0.15  # Günlük hacmin %15'inden fazlasını alma (Hızlı satış için)
+MAX_BUDGET_PER_ITEM = 0.30   # Tek bir iteme toplam bütçenin %30'undan fazlasını bağlama
 
 # --- YARDIMCI FONKSİYONLAR ---
 def generate_progress_bar(current, total):
     if total <= 0: return "⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ %0"
-    
     bar_length = 10 
     fraction = current / total
     filled = int(fraction * bar_length)
     
-    # İlerleme durumuna göre renk değiştiren ikonlar
     if fraction < 0.33:
         color_block = "🟥" 
     elif fraction < 0.66:
@@ -42,14 +42,12 @@ def generate_progress_bar(current, total):
         
     bar = color_block * filled + "⬜" * (bar_length - filled)
     percent = int(fraction * 100)
-    
     return f"┣ {bar}  `%{percent}`\n┗━━━━━━━━━━━━━━"
 
 def load_items():
     if os.path.exists("items.txt"):
         with open("items.txt", "r", encoding="utf-8") as f:
-            items = [line.strip() for line in f.readlines() if line.strip()]
-            return items
+            return [line.strip() for line in f.readlines() if line.strip()]
     return []
 
 def steam_net_hesapla(buyer_pays):
@@ -65,6 +63,38 @@ def steam_net_hesapla(buyer_pays):
             else: break
         else: seller_gets = round(seller_gets - 0.01, 2)
     return seller_gets
+
+def create_balanced_basket(final_list, total_balance):
+    basket = []
+    remaining_balance = total_balance
+    # Kâr marjı (ROI) en yüksek olan itemları en başa alıyoruz
+    sorted_items = sorted(final_list, key=lambda x: x['roi'], reverse=True)
+    
+    for item in sorted_items:
+        if remaining_balance <= 0.05: break
+        
+        # 1. Kısıt: Günlük hacim sınırı (Piyasayı bozmamak için)
+        max_qty_by_vol = math.floor(item['vol'] * VOLUME_LIMIT_PERCENT)
+        
+        # 2. Kısıt: Tek iteme bütçe sınırı (Risk dağıtımı için)
+        max_budget_for_this_item = total_balance * MAX_BUDGET_PER_ITEM
+        max_qty_by_budget = math.floor(min(remaining_balance, max_budget_for_this_item) / item['buy'])
+        
+        # İki kısıttan en düşük olanı alıyoruz
+        final_qty = min(max_qty_by_vol, max_qty_by_budget)
+        
+        if final_qty > 0:
+            cost = round(final_qty * item['buy'], 2)
+            profit = round((item['net'] - item['buy']) * final_qty, 2)
+            basket.append({
+                **item,
+                'final_qty': final_qty,
+                'total_profit': profit,
+                'total_cost': cost
+            })
+            remaining_balance -= cost
+            
+    return basket, round(total_balance - remaining_balance, 2)
 
 # --- VERİ ÇEKME ---
 async def fetch_item(session, name, idx, total):
@@ -93,7 +123,6 @@ async def fetch_item(session, name, idx, total):
             prices = [round(l['price']/100, 2) for l in listings]
             f_price = max(Counter(prices), key=Counter(prices).get)
 
-        logger.info(f"✅ [{idx}/{total}] {name} tarandı.")
         return {"name": name, "s": s_price, "f": f_price, "vol": vol}
     except Exception as e:
         return ("RETRY", str(e))
@@ -133,12 +162,8 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = len(items_list)
         all_results, errors_count, success_count = [], 0, 0
         
-        # Profesyonel ve emoji tabanlı bar ile başlıyoruz
-        prog_bar = generate_progress_bar(0, total)
         status_msg = await update.message.reply_text(
-            f"💠 **MARKET ANALİZİ YAPILIYOR**\n"
-            f"{prog_bar}\n\n"
-            f"📡 Durum: `Hazırlanıyor...`",
+            f"💠 **MARKET ANALİZİ YAPILIYOR**\n{generate_progress_bar(0, total)}\n\n📡 Durum: `Hazırlanıyor...`",
             reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True),
             parse_mode="Markdown"
         )
@@ -150,19 +175,16 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     break
 
                 try:
-                    current_bar = generate_progress_bar(i-1, total)
                     await status_msg.edit_text(
-                        f"💠 **MARKET ANALİZİ YAPILIYOR**\n"
-                        f"{current_bar}\n\n"
-                        f"📡 **İşlem:** `{item}`\n"
-                        f"✨ Başarılı: `{success_count}` | ⚠️ Hata: `{errors_count}`",
+                        f"💠 **MARKET ANALİZİ YAPILIYOR**\n{generate_progress_bar(i-1, total)}\n\n"
+                        f"📡 **İşlem:** `{item}`\n✨ Başarılı: `{success_count}` | ⚠️ Hata: `{errors_count}`",
                         parse_mode="Markdown"
                     )
                 except: pass
 
                 res = await fetch_item(session, item, i, total)
                 if isinstance(res, tuple) and res[0] == "RETRY":
-                    await asyncio.sleep(20)
+                    await asyncio.sleep(15)
                     res = await fetch_item(session, item, i, total)
 
                 if isinstance(res, dict):
@@ -171,9 +193,9 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     errors_count += 1
                 
-                await asyncio.sleep(random.uniform(5, 10))
+                await asyncio.sleep(random.uniform(5, 8))
 
-        # --- SONUÇ RAPORU ---
+        # --- SEPET ANALİZİ VE RAPORLAMA ---
         final_list = []
         for d in all_results:
             if 'CSFloat -> Steam' in mode:
@@ -183,40 +205,39 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 buy_from, buy_p, sell_to, sell_p = "Steam", d['s'], "CSFloat", d['f']
                 net_sell = round(sell_p * 0.98, 2)
             
-            qty = math.floor(user_balance / buy_p) if buy_p > 0 else 0
-            if qty > 0:
+            if buy_p > 0:
                 profit_per = round(net_sell - buy_p, 2)
-                total_profit = round(profit_per * qty, 2)
                 roi = round((profit_per / buy_p) * 100, 1)
-                if total_profit > 0:
+                if profit_per > 0:
                     final_list.append({
-                        'name': d['name'], 'qty': qty, 'profit': total_profit,
-                        'buy': buy_p, 'sell': sell_p, 'net': net_sell, 
-                        'roi': roi, 'buy_from': buy_from, 'sell_to': sell_to
+                        'name': d['name'], 'buy': buy_p, 'sell': sell_p, 
+                        'net': net_sell, 'roi': roi, 'vol': d['vol'],
+                        'buy_from': buy_from, 'sell_to': sell_to
                     })
 
-        sorted_res = sorted(final_list, key=lambda x: x['profit'], reverse=True)[:5]
+        sepet, harcanan_toplam = create_balanced_basket(final_list, user_balance)
         
-        if sorted_res:
-            report = f"🏆 **EN İYİ 5 FIRSAT**\n`{mode}`\n`Bakiye: ${user_balance}`\n\n"
-            for idx, item in enumerate(sorted_res, 1):
+        if sepet:
+            toplam_kar = round(sum(i['total_profit'] for i in sepet), 2)
+            report = f"⚖️ **RİSK DENGELİ ALIM SEPETİ**\n"
+            report += f"`Mod: {mode}`\n"
+            report += f"`Kullanılan Bakiye: ${harcanan_toplam} / ${user_balance}`\n\n"
+            
+            for idx, item in enumerate(sepet, 1):
                 report += (
                     f"{idx}. **{item['name']}**\n"
-                    f"📥 Alış ({item['buy_from']}): `${item['buy']}`\n"
-                    f"📤 Satış ({item['sell_to']}): `${item['sell']}`\n"
-                    f"💰 Net: `${item['net']}` | ROI: `%{item['roi']}`\n"
-                    f"📦 Adet: `{item['qty']}` | **Kâr: +${item['profit']}**\n\n"
+                    f"📦 Alınacak: `{item['final_qty']} Adet` (Hacim: {item['vol']})\n"
+                    f"📥 Alış: `${item['buy']}` | 💰 Kâr: **+${item['total_profit']}** (%{item['roi']})\n"
+                    f"────────────────────\n"
                 )
+            report += f"📊 **TOPLAM TAHMİNİ NET KÂR: ${toplam_kar}**"
             await update.message.reply_text(report, parse_mode="Markdown")
         else:
-            await update.message.reply_text("❌ Kârlı fırsat bulunamadı.")
+            await update.message.reply_text("❌ Kriterlere uygun güvenli fırsat bulunamadı.")
 
         context.user_data['analyzing'] = False
         post_scan_kb = [['🔄 Yeniden Başlat', '💰 Bakiye Değiştir'], ['🏠 Ana Menü']]
-        await update.message.reply_text(
-            "✅ İşlem tamamlandı. Şimdi ne yapalım?",
-            reply_markup=ReplyKeyboardMarkup(post_scan_kb, resize_keyboard=True)
-        )
+        await update.message.reply_text("✅ Analiz tamamlandı.", reply_markup=ReplyKeyboardMarkup(post_scan_kb, resize_keyboard=True))
 
     elif text == '🔄 Yeniden Başlat':
         await handle_msg(update, context)
