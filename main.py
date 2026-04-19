@@ -33,7 +33,7 @@ def generate_progress_bar(current, total, found=0):
     else:
         bar = "🟩" * filled + "⬜" * (bar_length - filled)
     percent = int(fraction * 100)
-    return f"┣ {bar}  `%{percent}`\n┣ `{current}/{total}` item  •  `{found}` fırsat bulundu"
+    return f"┣ {bar}  %{percent}\n┣ {current}/{total} item  •  {found} fırsat bulundu"
 
 def load_items():
     if os.path.exists("items.txt"):
@@ -111,8 +111,7 @@ async def scan_items(update, context, user_balance, items_list):
 
     # Tek progress mesajı gönder, sonra edit_text ile güncelle
     progress_msg = await update.message.reply_text(
-        f"🔎 *{total} item taranıyor...*\n{generate_progress_bar(0, total, 0)}",
-        parse_mode="Markdown",
+        f"🔎 {total} item taranıyor...\n{generate_progress_bar(0, total, 0)}",
         reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True)
     )
     context.user_data['progress_msg'] = progress_msg
@@ -136,8 +135,7 @@ async def scan_items(update, context, user_balance, items_list):
                 if i % 5 == 0 or i == total:
                     try:
                         await progress_msg.edit_text(
-                            f"🔎 *{total} item taranıyor...*\n{generate_progress_bar(i, total, found_count)}",
-                            parse_mode="Markdown"
+                            f"🔎 {total} item taranıyor...\n{generate_progress_bar(i, total, found_count)}"
                         )
                     except Exception:
                         pass  # Edit başarısız olursa sessizce devam et
@@ -147,8 +145,7 @@ async def scan_items(update, context, user_balance, items_list):
     except asyncio.CancelledError:
         try:
             await progress_msg.edit_text(
-                f"🛑 *Tarama durduruldu*\n{generate_progress_bar(len(all_results), total, found_count)}\n\n`{len(all_results)}/{total}` tamamlandı.",
-                parse_mode="Markdown"
+                f"🛑 Tarama durduruldu\n{generate_progress_bar(len(all_results), total, found_count)}\n\n{len(all_results)}/{total} tamamlandı."
             )
         except Exception:
             pass
@@ -165,8 +162,7 @@ async def scan_items(update, context, user_balance, items_list):
     # Tarama tamamlandı — progress mesajını güncelle
     try:
         await progress_msg.edit_text(
-            f"✅ *Tarama tamamlandı!*\n{generate_progress_bar(total, total, found_count)}",
-            parse_mode="Markdown"
+            f"✅ Tarama tamamlandı!\n{generate_progress_bar(total, total, found_count)}"
         )
     except Exception:
         pass
