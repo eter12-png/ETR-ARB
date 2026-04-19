@@ -22,15 +22,18 @@ MIN_VOLUME_LIMIT = 50
 VOLUME_LIMIT_PERCENT = 0.15
 MAX_BUDGET_PER_ITEM = 0.30
 
-def generate_progress_bar(current, total):
-    if total <= 0: return "⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ %0"
+def generate_progress_bar(current, total, found=0):
+    if total <= 0:
+        return "⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ %0"
     bar_length = 10
     fraction = current / total
     filled = int(fraction * bar_length)
-    color_block = "🟩" if fraction < 0.99 else "✅"
-    bar = color_block * filled + "⬜" * (bar_length - filled)
+    if fraction >= 1.0:
+        bar = "✅" * bar_length
+    else:
+        bar = "🟩" * filled + "⬜" * (bar_length - filled)
     percent = int(fraction * 100)
-    return f"┣ {bar}  `%{percent}`"
+    return f"┣ {bar}  `%{percent}`\n┣ `{current}/{total}` item  •  `{found}` fırsat bulundu"
 
 def load_items():
     if os.path.exists("items.txt"):
@@ -104,34 +107,53 @@ async def fetch_item(session, name):
 async def scan_items(update, context, user_balance, items_list):
     total = len(items_list)
     all_results = []
+    found_count = 0
 
-    await update.message.reply_text(
-        f"🔎 **{total}** item taranıyor...",
+    # Tek progress mesajı gönder, sonra edit_text ile güncelle
+    progress_msg = await update.message.reply_text(
+        f"🔎 *{total} item taranıyor...*\n{generate_progress_bar(0, total, 0)}",
+        parse_mode="Markdown",
         reply_markup=ReplyKeyboardMarkup([['🛑 Taramayı Durdur']], resize_keyboard=True)
     )
+    context.user_data['progress_msg'] = progress_msg
 
     try:
         timeout = aiohttp.ClientTimeout(total=5)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             for i, item in enumerate(items_list, 1):
+                # Her mesaj kontrolünde durdurma bayrağını kontrol et
+                if context.user_data.get('stop_scan'):
+                    context.user_data['stop_scan'] = False
+                    raise asyncio.CancelledError()
+
                 logger.info(f"[{i}/{total}] {item}")
-
                 res = await fetch_item(session, item)
-
                 if res:
                     all_results.append(res)
+                    found_count += 1
 
-                if i % 10 == 0:
-                    await update.message.reply_text(
-                        f"⏳ {generate_progress_bar(i, total)}",
-                        parse_mode="Markdown"
-                    )
+                # Her 5 itemda bir progress mesajını güncelle
+                if i % 5 == 0 or i == total:
+                    try:
+                        await progress_msg.edit_text(
+                            f"🔎 *{total} item taranıyor...*\n{generate_progress_bar(i, total, found_count)}",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass  # Edit başarısız olursa sessizce devam et
 
                 await asyncio.sleep(random.uniform(1, 2))
 
     except asyncio.CancelledError:
+        try:
+            await progress_msg.edit_text(
+                f"🛑 *Tarama durduruldu*\n{generate_progress_bar(len(all_results), total, found_count)}\n\n`{len(all_results)}/{total}` tamamlandı.",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
         await update.message.reply_text(
-            "🛑 Tarama durduruldu.\nNe yapmak istersin?",
+            "Ne yapmak istersin?",
             reply_markup=ReplyKeyboardMarkup(
                 [['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']],
                 resize_keyboard=True
@@ -139,6 +161,15 @@ async def scan_items(update, context, user_balance, items_list):
         )
         context.user_data['analyzing'] = False
         return None
+
+    # Tarama tamamlandı — progress mesajını güncelle
+    try:
+        await progress_msg.edit_text(
+            f"✅ *Tarama tamamlandı!*\n{generate_progress_bar(total, total, found_count)}",
+            parse_mode="Markdown"
+        )
+    except Exception:
+        pass
 
     return all_results
 
@@ -150,9 +181,8 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
     if text == "🛑 Taramayı Durdur":
-        task = context.user_data.get('task')
-        if task:
-            task.cancel()
+        if context.user_data.get('analyzing'):
+            context.user_data['stop_scan'] = True
         return
 
     if text in ['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']:
@@ -174,11 +204,9 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['analyzing'] = False
             return
 
-        context.user_data['task'] = asyncio.create_task(
-            scan_items(update, context, user_balance, items_list)
-        )
+        context.user_data['stop_scan'] = False
 
-        all_results = await context.user_data['task']
+        all_results = await scan_items(update, context, user_balance, items_list)
         if all_results is None:
             return
 
