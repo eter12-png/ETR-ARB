@@ -84,58 +84,50 @@ def create_balanced_basket(final_list, total_balance):
             profit = round((item['net'] - item['buy']) * final_qty, 2)
             basket.append({**item, 'final_qty': final_qty, 'total_profit': profit, 'total_cost': cost})
             remaining_balance -= cost
+        else:
+            logger.debug(f"ℹ️ {item['name']} atlandı: Bütçe/Hacim limiti yetersiz.")
             
     return basket, round(total_balance - remaining_balance, 2)
 
 # --- VERİ ÇEKME ---
 async def fetch_item(session, name):
-    # Steam için tarayıcı kimlikleri
-    user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0'
-    ]
-    
-    steam_headers = {'User-Agent': random.choice(user_agents)}
-    # CSFloat API için SADECE Authorization (Eski çalışan sistemdeki gibi)
-    csfloat_headers = {"Authorization": API_KEY}
-    
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
     safe_name = urllib.parse.quote(name)
     s_url = f"https://steamcommunity.com/market/priceoverview/?appid=730&currency=1&market_hash_name={safe_name}"
     f_url = f"https://csfloat.com/api/v1/listings?market_hash_name={safe_name}&limit=50&sort_by=lowest_price&type=buy_now"
 
     try:
         # --- STEAM ---
-        async with session.get(s_url, headers=steam_headers, timeout=15) as r_s:
-            if r_s.status in [429, 403]:
-                return ("RETRY", f"Steam Limit ({r_s.status})")
+        async with session.get(s_url, headers=headers, timeout=15) as r_s:
+            if r_s.status == 429:
+                return ("RETRY", "Steam rate limit (429)")
             if r_s.status != 200:
-                return ("SKIP", f"Steam HTTP {r_s.status}")
-            
+                return ("SKIP", f"Steam HTTP hata: {r_s.status}")
             s_data = await r_s.json()
             if not s_data or "lowest_price" not in s_data:
-                return ("SKIP", "Fiyat Yok")
+                return ("SKIP", "Steam lowest_price yok")
 
             raw_vol = str(s_data.get("volume", "0")).replace(",", "")
             vol = int(raw_vol) if raw_vol.isdigit() else 0
             if vol < MIN_VOLUME_LIMIT:
-                return ("SKIP", f"Düşük Vol: {vol}")
+                return ("SKIP", f"Düşük volume: {vol}")
 
             s_price = float(s_data["lowest_price"].replace("$", "").replace(",", ""))
 
+        # Steam çekildikten sonra kısa bir nefes
         await asyncio.sleep(random.uniform(1.0, 2.0))
 
         # --- CSFLOAT ---
-        async with session.get(f_url, headers=csfloat_headers, timeout=15) as r_f:
-            if r_f.status in [429, 403]:
-                return ("RETRY", f"CSFloat Limit ({r_f.status})")
+        async with session.get(f_url, headers={"Authorization": API_KEY, "User-Agent": headers['User-Agent']}, timeout=15) as r_f:
+            if r_f.status == 429:
+                return ("RETRY", "CSFloat rate limit (429)")
             if r_f.status != 200:
-                return ("SKIP", f"CSFloat HTTP {r_f.status}")
+                return ("SKIP", f"CSFloat HTTP hata: {r_f.status}")
             
             f_data = await r_f.json()
             listings = f_data if isinstance(f_data, list) else f_data.get('data', [])
             if not listings:
-                return ("SKIP", "Listing Yok")
+                return ("SKIP", "CSFloat boş listing")
 
             prices = [round(l['price']/100, 2) for l in listings]
             f_price = max(Counter(prices), key=Counter(prices).get)
@@ -143,7 +135,7 @@ async def fetch_item(session, name):
         return {"name": name, "s": s_price, "f": f_price, "vol": vol}
     
     except Exception as e:
-        return ("RETRY", f"Hata: {str(e)}")
+        return ("RETRY", f"Exception: {str(e)}")
 
 # --- ARKA PLAN TARAMA GÖREVİ ---
 async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_list: list, user_balance: float):
@@ -158,41 +150,42 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_lis
     try:
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
+                logger.info(f"[{i}/{total}] Taranıyor: {item}")
+                
                 res = await fetch_item(session, item)
                 
-                # --- RETRY MANTIĞI ---
+                # --- RETRY MANTIĞI (60-120 SN BEKLEME) ---
                 retry_count = 0
                 while isinstance(res, tuple) and res[0] == "RETRY" and retry_count < 2:
-                    wait_time = random.uniform(180, 300) # 3-5 dk bekle
-                    logger.warning(f"⚠️ {item} limitlendi. Bekleniyor: {int(wait_time)}s")
-                    await asyncio.sleep(wait_time)
+                    logger.warning(f"⚠️ {item} için hata alındı. {retry_count+1}. deneme öncesi bekleniyor...")
+                    await asyncio.sleep(random.uniform(60, 120))
                     res = await fetch_item(session, item)
                     retry_count += 1
 
+                if isinstance(res, tuple) and res[0] == "SKIP":
+                    continue
+
                 if isinstance(res, dict):
                     all_results.append(res)
-                    logger.info(f"✅ [{i}/{total}] {item} çekildi.")
 
                 if i % 10 == 0:
-                    try:
-                        await update.message.reply_text(
-                            f"⏳ İlerleme: {generate_progress_bar(i, total)}",
-                            parse_mode="Markdown"
-                        )
-                    except: pass
+                    await update.message.reply_text(
+                        f"⏳ İlerleme: {generate_progress_bar(i, total)}",
+                        parse_mode="Markdown"
+                    )
                 
-                # Sabırlı ama optimize bekleme
-                await asyncio.sleep(random.uniform(7, 12))
+                # --- ITEMLAR ARASI BEKLEME (14-20 SN) ---
+                await asyncio.sleep(random.uniform(14, 20))
                 
+                # --- HER 20 ITEMDA BİR BLOK BEKLEME (120-180 SN) ---
                 if i % 20 == 0:
-                    await asyncio.sleep(random.uniform(60, 90))
+                    logger.info("⏸️ 20 item doldu, blok bekleme yapılıyor...")
+                    await asyncio.sleep(random.uniform(120, 180))
 
-        # --- SEPET ANALİZİ ---
+        # --- SEPET ANALİZİ VE RAPORLAMA ---
         final_list = []
-        mode = context.user_data.get('mode', '🔄 CSFloat -> Steam')
-        
         for d in all_results:
-            if 'CSFloat -> Steam' in mode:
+            if 'CSFloat -> Steam' in context.user_data['mode']:
                 buy_p, sell_p, net_sell = d['f'], d['s'], steam_net_hesapla(d['s'])
             else:
                 buy_p, sell_p, net_sell = d['s'], d['f'], round(d['f'] * 0.98, 2)
@@ -207,59 +200,77 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_lis
         sepet, harcanan = create_balanced_basket(final_list, user_balance)
 
         if sepet:
-            report = f"⚖️ **RİSK DENGELİ SEPET**\nHarcanan: `${harcanan}`\n\n"
+            report = f"⚖️ **RİSK DENGELİ ALIM SEPETİ**\nBakiye: `${harcanan}` / `${user_balance}`\n\n"
             for idx, item in enumerate(sepet, 1):
                 report += f"{idx}. **{item['name']}**\n"
-                report += f"💰 {item['buy']} -> {item['sell']} (Net: {item['net']})\n"
-                report += f"📦 {item['final_qty']} Adet | Kâr: +${item['total_profit']} (%{item['roi']})\n---\n" 
+                report += f"💰 Alış: `${item['buy']}` | Satış: `${item['sell']}`\n"
+                report += f"📩 Net: `${item['net']}`\n"
+                report += f"📦 {item['final_qty']} Adet | Kâr: +${item['total_profit']} (%{item['roi']})\n"
+                report += f"---\n" 
+                
             report += f"\n📈 **TOPLAM KÂR: ${round(sum(i['total_profit'] for i in sepet), 2)}**"
             await update.message.reply_text(report, parse_mode="Markdown")
         else:
             await update.message.reply_text("❌ Kârlı fırsat yok.")
 
         context.user_data['analyzing'] = False
-        await update.message.reply_text("✅ Bitti.", reply_markup=ReplyKeyboardMarkup([['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']], resize_keyboard=True))
+        await update.message.reply_text(
+            "✅ İşlem bitti. Şimdi ne yapalım?",
+            reply_markup=ReplyKeyboardMarkup([['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']], resize_keyboard=True)
+        )
 
+    except asyncio.CancelledError:
+        pass
     except Exception as e:
-        logger.error(f"Hata: {e}")
+        logger.error(f"Tarama sırasında hata: {e}")
         context.user_data['analyzing'] = False
 
-# --- TELEGRAM STANDART ---
+# --- TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']]
-    await update.message.reply_text("🚀 Seçim yapın:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    await update.message.reply_text("🚀 İşlem yönü seçin:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+
     if text == "🛑 Taramayı Durdur":
         task = context.user_data.get('scan_task')
-        if task and not task.done(): task.cancel()
+        if task and not task.done():
+            task.cancel()
         context.user_data['analyzing'] = False
-        await update.message.reply_text("🛑 Durduruldu.", reply_markup=ReplyKeyboardMarkup([['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']], resize_keyboard=True))
+        kb = [['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']]
+        await update.message.reply_text("🛑 Tarama durduruldu.", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
         return
 
     if text in ['🔄 CSFloat -> Steam', '🔄 Steam -> CSFloat']:
         context.user_data['mode'] = text
-        await update.message.reply_text("💰 Bakiye gir ($):", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("💰 Bakiye girin ($):", reply_markup=ReplyKeyboardRemove())
         return
 
     if 'mode' in context.user_data and not context.user_data.get('analyzing'):
         try:
             user_balance = float(text.replace(",", "."))
             context.user_data['analyzing'] = True
-            items_list = load_items()
-            if not items_list:
-                await update.message.reply_text("❌ items.txt yok.")
-                context.user_data['analyzing'] = False
-                return
-            context.user_data['scan_task'] = asyncio.create_task(run_scan(update, context, items_list, user_balance))
-        except:
+        except ValueError:
             await update.message.reply_text("❌ Sayı girin.")
+            return
+
+        items_list = load_items()
+        if not items_list:
+            await update.message.reply_text("❌ items.txt bulunamadı.")
+            context.user_data['analyzing'] = False
+            return
+
+        context.user_data['scan_task'] = asyncio.create_task(
+            run_scan(update, context, items_list, user_balance)
+        )
 
 if __name__ == "__main__":
-    if TELEGRAM_TOKEN and API_KEY:
+    if not TELEGRAM_TOKEN or not API_KEY:
+        print("❌ HATA: API_KEY veya TELEGRAM_TOKEN sistem değişkeni bulunamadı!")
+    else:
         app = Application.builder().token(TELEGRAM_TOKEN).build()
         app.add_handler(CommandHandler("start", start))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_msg))
-        logger.info("🚀 Railway kalesi aktif!")
+        logger.info("🚀 Bot aktif, Railway üzerinde çalışıyor...")
         app.run_polling()
