@@ -128,7 +128,7 @@ async def fetch_item(session, name):
         await asyncio.sleep(random.uniform(1.5, 3.0))
 
         # --- CSFLOAT ---
-        async with session.get(f_url, headers={"Authorization": API_KEY, "User-Agent": headers['User-Agent']}, timeout=15) as r_f:
+        async with session.get(f_url, headers={"Authorization": API_KEY}, timeout=15) as r_f:
             if r_f.status in [429, 403, 500, 502, 503, 504]:
                 return ("RETRY", f"CSFloat hata/limit ({r_f.status})")
             elif r_f.status != 200:
