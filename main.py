@@ -91,7 +91,15 @@ def create_balanced_basket(final_list, total_balance):
 
 # --- VERİ ÇEKME ---
 async def fetch_item(session, name):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
+    # 403 Hatalarını engellemek için User-Agent Rotasyonu
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/121.0.0.0 Safari/537.36'
+    ]
+    
+    headers = {'User-Agent': random.choice(user_agents)}
     safe_name = urllib.parse.quote(name)
     s_url = f"https://steamcommunity.com/market/priceoverview/?appid=730&currency=1&market_hash_name={safe_name}"
     f_url = f"https://csfloat.com/api/v1/listings?market_hash_name={safe_name}&limit=50&sort_by=lowest_price&type=buy_now"
@@ -99,10 +107,12 @@ async def fetch_item(session, name):
     try:
         # --- STEAM ---
         async with session.get(s_url, headers=headers, timeout=15) as r_s:
-            if r_s.status == 429:
-                return ("RETRY", "Steam rate limit (429)")
-            if r_s.status != 200:
+            # Sadece 429 değil, 403 ve 500'lü hataları da RETRY'a düşür
+            if r_s.status in [429, 403, 500, 502, 503, 504]:
+                return ("RETRY", f"Steam hata/limit ({r_s.status})")
+            elif r_s.status != 200:
                 return ("SKIP", f"Steam HTTP hata: {r_s.status}")
+            
             s_data = await r_s.json()
             if not s_data or "lowest_price" not in s_data:
                 return ("SKIP", "Steam lowest_price yok")
@@ -114,14 +124,14 @@ async def fetch_item(session, name):
 
             s_price = float(s_data["lowest_price"].replace("$", "").replace(",", ""))
 
-        # Steam çekildikten sonra kısa bir nefes
-        await asyncio.sleep(random.uniform(1.0, 2.0))
+        # Steam çekildikten sonra kısa bir nefes (CSFloat'a geçmeden önce)
+        await asyncio.sleep(random.uniform(1.5, 3.0))
 
         # --- CSFLOAT ---
         async with session.get(f_url, headers={"Authorization": API_KEY, "User-Agent": headers['User-Agent']}, timeout=15) as r_f:
-            if r_f.status == 429:
-                return ("RETRY", "CSFloat rate limit (429)")
-            if r_f.status != 200:
+            if r_f.status in [429, 403, 500, 502, 503, 504]:
+                return ("RETRY", f"CSFloat hata/limit ({r_f.status})")
+            elif r_f.status != 200:
                 return ("SKIP", f"CSFloat HTTP hata: {r_f.status}")
             
             f_data = await r_f.json()
@@ -154,11 +164,13 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_lis
                 
                 res = await fetch_item(session, item)
                 
-                # --- RETRY MANTIĞI (60-120 SN BEKLEME) ---
+                # --- RETRY MANTIĞI (AĞIR GERİ ÇEKİLME) ---
                 retry_count = 0
-                while isinstance(res, tuple) and res[0] == "RETRY" and retry_count < 2:
-                    logger.warning(f"⚠️ {item} için hata alındı. {retry_count+1}. deneme öncesi bekleniyor...")
-                    await asyncio.sleep(random.uniform(60, 120))
+                while isinstance(res, tuple) and res[0] == "RETRY" and retry_count < 3: # Şansımızı 3'e çıkardık
+                    # Steam genellikle 1-2 dakikada ban kaldırmaz. 4-6 dakika arası bekletiyoruz.
+                    bekleme_suresi = random.uniform(240, 360) 
+                    logger.warning(f"⚠️ {item} için hata ({res[1]}). {retry_count+1}. deneme öncesi {int(bekleme_suresi)} saniye bekleniyor...")
+                    await asyncio.sleep(bekleme_suresi)
                     res = await fetch_item(session, item)
                     retry_count += 1
 
@@ -174,13 +186,14 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_lis
                         parse_mode="Markdown"
                     )
                 
-                # --- ITEMLAR ARASI BEKLEME (14-20 SN) ---
-                await asyncio.sleep(random.uniform(14, 20))
+                # --- ITEMLAR ARASI BEKLEME (DAHA HIZLI) ---
+                # Sorun yaşanmadığı sürece hızlıca taramaya devam et
+                await asyncio.sleep(random.uniform(5, 8))
                 
-                # --- HER 20 ITEMDA BİR BLOK BEKLEME (120-180 SN) ---
+                # --- HER 20 ITEMDA BİR BLOK BEKLEME (KISA MOLA) ---
                 if i % 20 == 0:
                     logger.info("⏸️ 20 item doldu, blok bekleme yapılıyor...")
-                    await asyncio.sleep(random.uniform(120, 180))
+                    await asyncio.sleep(random.uniform(60, 90))
 
         # --- SEPET ANALİZİ VE RAPORLAMA ---
         final_list = []
