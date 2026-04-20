@@ -22,7 +22,7 @@ API_KEY = os.getenv("CSFLOAT_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MIN_VOLUME_LIMIT = 50
 VOLUME_LIMIT_PERCENT = 0.15
-MAX_BUDGET_PER_ITEM = 0.30
+MAX_BUDGET_PER_ITEM = 0.30  # NOT: Küçük bakiye ile test yapıyorsan burayı geçici olarak 1.0 yapabilirsin.
 
 # --- YARDIMCI FONKSİYONLAR ---
 def generate_progress_bar(current, total):
@@ -78,11 +78,16 @@ def create_balanced_basket(final_list, total_balance):
         max_budget_for_this_item = total_balance * MAX_BUDGET_PER_ITEM
         max_qty_by_budget = math.floor(min(remaining_balance, max_budget_for_this_item) / item['buy'])
         final_qty = min(max_qty_by_vol, max_qty_by_budget)
+        
         if final_qty > 0:
             cost = round(final_qty * item['buy'], 2)
             profit = round((item['net'] - item['buy']) * final_qty, 2)
             basket.append({**item, 'final_qty': final_qty, 'total_profit': profit, 'total_cost': cost})
             remaining_balance -= cost
+        else:
+            # Geliştirme: Sepete neden eklenmediğini terminalde göster (Bütçe veya Hacim yetersizliği)
+            logger.debug(f"ℹ️ {item['name']} atlandı: Bütçe/Hacim limiti yetersiz. (Fiyat: ${item['buy']})")
+            
     return basket, round(total_balance - remaining_balance, 2)
 
 # --- VERİ ÇEKME ---
@@ -115,7 +120,10 @@ async def fetch_item(session, name):
             f_price = max(Counter(prices), key=Counter(prices).get)
 
         return {"name": name, "s": s_price, "f": f_price, "vol": vol}
-    except:
+    
+    # Geliştirme: Hatayı yutmak yerine logla
+    except Exception as e:
+        logger.error(f"[{name}] çekilirken hata oluştu: {str(e)}")
         return ("RETRY", "Hata")
 
 # --- YENİ: ARKA PLAN TARAMA GÖREVİ ---
@@ -131,20 +139,24 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_lis
     try:
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
-                # Konsola yazdır (Telegram'ı yormamak için)
                 logger.info(f"[{i}/{total}] Taranıyor: {item}")
 
                 res = await fetch_item(session, item)
 
+                # Geliştirme: 429 Hataları için daha iyi loglama ve bekleme süresi
                 if isinstance(res, tuple) and res[0] == "RETRY":
-                    await asyncio.sleep(10)
+                    logger.warning(f"⚠️ {item} için hata/429 alındı. 15sn bekleniyor...")
+                    await asyncio.sleep(15)
                     res = await fetch_item(session, item)
+                    
+                    if isinstance(res, tuple) and res[0] == "RETRY":
+                        logger.error(f"❌ {item} ikinci denemede de başarısız oldu. Atlanıyor.")
+                        continue # Hatalı item'ı tamamen es geç
 
                 if isinstance(res, dict):
                     all_results.append(res)
                     success_count += 1
 
-                # Her 10 itemda bir Telegram'a küçük bir güncelleme atalım
                 if i % 10 == 0:
                     await update.message.reply_text(
                         f"⏳ İlerleme: {generate_progress_bar(i, total)}",
@@ -191,12 +203,10 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_lis
         )
 
     except asyncio.CancelledError:
-        # task.cancel() tetiklendiğinde döngü anında kesilip buraya düşer
         pass
     except Exception as e:
         logger.error(f"Tarama sırasında hata: {e}")
         context.user_data['analyzing'] = False
-
 
 # --- TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -206,11 +216,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    # 1. ANINDA DURDURMA MANTIĞI
     if text == "🛑 Taramayı Durdur":
         task = context.user_data.get('scan_task')
         if task and not task.done():
-            task.cancel()  # Arka plandaki taramayı anında imha eder
+            task.cancel()
         
         context.user_data['analyzing'] = False
         
@@ -240,7 +249,6 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['analyzing'] = False
             return
 
-        # 2. GÖREVİ ARKA PLANDA BAŞLATMA
         context.user_data['scan_task'] = asyncio.create_task(
             run_scan(update, context, items_list, user_balance)
         )
