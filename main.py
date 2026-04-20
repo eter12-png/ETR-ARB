@@ -97,30 +97,45 @@ async def fetch_item(session, name):
     f_url = f"https://csfloat.com/api/v1/listings?market_hash_name={safe_name}&limit=50&sort_by=lowest_price&type=buy_now"
 
     try:
-        async with session.get(s_url, headers=headers, timeout=10) as r_s:
+        # --- STEAM ---
+        async with session.get(s_url, headers=headers, timeout=15) as r_s:
             if r_s.status == 429:
-                return ("RETRY", "429")
+                return ("RETRY", "Steam rate limit (429)")
+            if r_s.status != 200:
+                return ("SKIP", f"Steam HTTP hata: {r_s.status}")
             s_data = await r_s.json()
             if not s_data or "lowest_price" not in s_data:
-                return ("SKIP", "Yok")
-            vol = int(str(s_data.get("volume", "0")).replace(",", "")) if str(s_data.get("volume", "0")).replace(",", "").isdigit() else 0
+                return ("SKIP", "Steam lowest_price yok")
+
+            raw_vol = str(s_data.get("volume", "0")).replace(",", "")
+            vol = int(raw_vol) if raw_vol.isdigit() else 0
             if vol < MIN_VOLUME_LIMIT:
-                return ("SKIP", "Düşük Hacim")
+                return ("SKIP", f"Düşük volume: {vol}")
+
             s_price = float(s_data["lowest_price"].replace("$", "").replace(",", ""))
 
-        async with session.get(f_url, headers={"Authorization": API_KEY}, timeout=10) as r_f:
+        # Steam çekildikten sonra kısa bir nefes
+        await asyncio.sleep(random.uniform(1.0, 2.0))
+
+        # --- CSFLOAT ---
+        async with session.get(f_url, headers={"Authorization": API_KEY, "User-Agent": headers['User-Agent']}, timeout=15) as r_f:
+            if r_f.status == 429:
+                return ("RETRY", "CSFloat rate limit (429)")
+            if r_f.status != 200:
+                return ("SKIP", f"CSFloat HTTP hata: {r_f.status}")
+            
             f_data = await r_f.json()
             listings = f_data if isinstance(f_data, list) else f_data.get('data', [])
             if not listings:
-                return ("SKIP", "İlan Yok")
-            prices = [round(l['price'] / 100, 2) for l in listings]
+                return ("SKIP", "CSFloat boş listing")
+
+            prices = [round(l['price']/100, 2) for l in listings]
             f_price = max(Counter(prices), key=Counter(prices).get)
 
         return {"name": name, "s": s_price, "f": f_price, "vol": vol}
     
     except Exception as e:
-        logger.error(f"[{name}] çekilirken hata oluştu: {str(e)}")
-        return ("RETRY", "Hata")
+        return ("RETRY", f"Exception: {str(e)}")
 
 # --- ARKA PLAN TARAMA GÖREVİ ---
 async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_list: list, user_balance: float):
@@ -136,14 +151,19 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_lis
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(items_list, 1):
                 logger.info(f"[{i}/{total}] Taranıyor: {item}")
+                
                 res = await fetch_item(session, item)
-
-                if isinstance(res, tuple) and res[0] == "RETRY":
-                    logger.warning(f"⚠️ {item} için hata/429. 15sn bekleniyor...")
-                    await asyncio.sleep(15)
+                
+                # --- RETRY MANTIĞI (60-120 SN BEKLEME) ---
+                retry_count = 0
+                while isinstance(res, tuple) and res[0] == "RETRY" and retry_count < 2:
+                    logger.warning(f"⚠️ {item} için hata alındı. {retry_count+1}. deneme öncesi bekleniyor...")
+                    await asyncio.sleep(random.uniform(60, 120))
                     res = await fetch_item(session, item)
-                    if isinstance(res, tuple) and res[0] == "RETRY":
-                        continue
+                    retry_count += 1
+
+                if isinstance(res, tuple) and res[0] == "SKIP":
+                    continue
 
                 if isinstance(res, dict):
                     all_results.append(res)
@@ -153,7 +173,14 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_lis
                         f"⏳ İlerleme: {generate_progress_bar(i, total)}",
                         parse_mode="Markdown"
                     )
-                await asyncio.sleep(random.uniform(3, 5))
+                
+                # --- ITEMLAR ARASI BEKLEME (14-20 SN) ---
+                await asyncio.sleep(random.uniform(14, 20))
+                
+                # --- HER 20 ITEMDA BİR BLOK BEKLEME (120-180 SN) ---
+                if i % 20 == 0:
+                    logger.info("⏸️ 20 item doldu, blok bekleme yapılıyor...")
+                    await asyncio.sleep(random.uniform(120, 180))
 
         # --- SEPET ANALİZİ VE RAPORLAMA ---
         final_list = []
@@ -175,10 +202,9 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_lis
         if sepet:
             report = f"⚖️ **RİSK DENGELİ ALIM SEPETİ**\nBakiye: `${harcanan}` / `${user_balance}`\n\n"
             for idx, item in enumerate(sepet, 1):
-                # Detaylandırılmış rapor satırları
                 report += f"{idx}. **{item['name']}**\n"
                 report += f"💰 Alış: `${item['buy']}` | Satış: `${item['sell']}`\n"
-                report += f"📩 Net (Komisyon Sonrası): `${item['net']}`\n"
+                report += f"📩 Net: `${item['net']}`\n"
                 report += f"📦 {item['final_qty']} Adet | Kâr: +${item['total_profit']} (%{item['roi']})\n"
                 report += f"---\n" 
                 
@@ -240,7 +266,11 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 if __name__ == "__main__":
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_msg))
-    app.run_polling()
+    if not TELEGRAM_TOKEN or not API_KEY:
+        print("❌ HATA: API_KEY veya TELEGRAM_TOKEN sistem değişkeni bulunamadı!")
+    else:
+        app = Application.builder().token(TELEGRAM_TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_msg))
+        logger.info("🚀 Bot aktif, Railway üzerinde çalışıyor...")
+        app.run_polling()
