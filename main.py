@@ -149,6 +149,9 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_lis
 
                 if isinstance(res, dict):
                     all_results.append(res)
+                elif isinstance(res, tuple):
+                    # Her itemin neden elendiğini loglayarak "sessiz" hataları görünür yapar.
+                    logger.info(f"[{i}/{total}] {item} atlandı: {res[1]}")
 
                 # --- BASİT İLERLEME BİLDİRİMİ (PROGRESS BAR YERİNE) ---
                 if i % 50 == 0:
@@ -193,7 +196,8 @@ async def run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, items_lis
     except asyncio.CancelledError:
         pass
     except Exception as e:
-        logger.error(f"Hata: {e}")
+        logger.exception(f"Tarama sırasında beklenmeyen hata: {e}")
+        await update.message.reply_text("❌ Tarama sırasında hata oluştu. Railway loglarını kontrol edin.")
         context.user_data['analyzing'] = False
 
 # --- TELEGRAM STANDART FONKSİYONLAR ---
@@ -225,7 +229,8 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data['analyzing'] = False
                 return
             context.user_data['scan_task'] = asyncio.create_task(run_scan(update, context, items_list, user_balance))
-        except:
+        except Exception as e:
+            logger.exception(f"Kullanıcı bakiyesi parse edilirken hata: {e}")
             await update.message.reply_text("❌ Sayı girin.")
 
 if __name__ == "__main__":
@@ -235,3 +240,5 @@ if __name__ == "__main__":
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_msg))
         logger.info("🚀 Bot aktif!")
         app.run_polling()
+    else:
+        logger.error("Eksik env var: TELEGRAM_BOT_TOKEN ve/veya CSFLOAT_API_KEY bulunamadı.")
